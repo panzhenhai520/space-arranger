@@ -37,18 +37,66 @@
     <div id="root"></div>
 
     <script type="text/babel">
-        // 引入 useMemo 以优化性能
         const { useState, useEffect, useRef, useMemo } = React;
+
+        // --- 新增：智能联动算法，找出所有共线且相连的墙体段（如被窗户切开的同一面墙） ---
+        const getCollinearGroup = (startWallId, walls) => {
+            const group = new Set([startWallId]);
+            const queue = [startWallId];
+            
+            const isCollinearAndConnected = (w1, w2) => {
+                const TOL = 2; // 端点连接容差 (像素)
+                const connected = 
+                    (Math.hypot(w1.x1 - w2.x1, w1.y1 - w2.y1) < TOL) ||
+                    (Math.hypot(w1.x1 - w2.x2, w1.y1 - w2.y2) < TOL) ||
+                    (Math.hypot(w1.x2 - w2.x1, w1.y2 - w2.y1) < TOL) ||
+                    (Math.hypot(w1.x2 - w2.x2, w1.y2 - w2.y2) < TOL);
+                if (!connected) return false;
+                
+                const dx1 = w1.x2 - w1.x1; const dy1 = w1.y2 - w1.y1;
+                const dx2 = w2.x2 - w2.x1; const dy2 = w2.y2 - w2.y1;
+                const cross = dx1 * dy2 - dy1 * dx2;
+                const len1 = Math.hypot(dx1, dy1);
+                const len2 = Math.hypot(dx2, dy2);
+                if (len1 === 0 || len2 === 0) return false;
+                
+                // 角度误差判断 (越接近 0 越平行)
+                return Math.abs(cross / (len1 * len2)) < 0.05; 
+            };
+
+            while(queue.length > 0) {
+                const currentId = queue.shift();
+                const currentWall = walls.find(w => w.id === currentId);
+                if (!currentWall) continue;
+                
+                walls.forEach(w => {
+                    if (!group.has(w.id)) {
+                        if (isCollinearAndConnected(currentWall, w)) {
+                            group.add(w.id);
+                            queue.push(w.id);
+                        }
+                    }
+                });
+            }
+            return Array.from(group);
+        };
 
         // ==========================================
         // 3D 视图组件
         // ==========================================
-        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, wallThickness, cornerFillers, onUpdateWall, onUpdateWindowWidth, onUpdateItem, onExit }) => {
+        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, wallThickness, cornerFillers, floorColor, ceilingColor, onUpdateWall, onUpdateWindowWidth, onUpdateItem, onUpdateFloorColor, onUpdateCeilingColor, onExit }) => {
             const mountRef = useRef(null);
             const minimapRef = useRef(null);
             
-            // 核心：统一管理当前选中的 3D 物体 (窗户或家具)
             const [selectedObj, setSelectedObj] = useState(null); 
+
+            // --- 新增：实时计算与选中物体联动的墙面群组 ---
+            const selectedGroupIds = useMemo(() => {
+                if (selectedObj?.type === 'solid' || selectedObj?.type === 'window') {
+                    return getCollinearGroup(selectedObj.id, walls);
+                }
+                return [];
+            }, [selectedObj, walls]);
 
             const cameraStateRef = useRef({ x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0 });
 
@@ -80,36 +128,47 @@
                 dirLight.castShadow = true;
                 scene.add(dirLight);
 
+                // --- 统一交互目标集合 (地面、天花板、墙面、窗户、家具一网打尽) ---
+                const interactables = [];
+
+                // 构建可点选的地面
                 const floorGeo = new THREE.PlaneGeometry(100, 100);
-                const floorMat = new THREE.MeshStandardMaterial({ color: 0x7a7c7f, roughness: 0.95, metalness: 0.05 });
+                const isFloorSelected = selectedObj?.type === 'floor';
+                const floorMat = new THREE.MeshStandardMaterial({ 
+                    color: floorColor, roughness: 0.95, metalness: 0.05,
+                    emissive: isFloorSelected ? 0x222222 : 0x000000 
+                });
                 const floor = new THREE.Mesh(floorGeo, floorMat);
                 floor.rotation.x = -Math.PI / 2;
                 floor.receiveShadow = true;
+                floor.userData = { id: 'floor', type: 'floor' };
                 scene.add(floor);
+                interactables.push(floor);
                 
+                // 构建可点选的天花板
                 const ceilingGeo = new THREE.PlaneGeometry(100, 100);
-                const ceilingMat = new THREE.MeshStandardMaterial({ color: 0xf5f5f5, roughness: 0.9, side: THREE.FrontSide });
+                const isCeilingSelected = selectedObj?.type === 'ceiling';
+                const ceilingMat = new THREE.MeshStandardMaterial({ 
+                    color: ceilingColor, roughness: 0.9, side: THREE.FrontSide,
+                    emissive: isCeilingSelected ? 0x222222 : 0x000000 
+                });
                 const ceiling = new THREE.Mesh(ceilingGeo, ceilingMat);
                 ceiling.rotation.x = Math.PI / 2; 
                 ceiling.position.y = wallHeight;
                 ceiling.receiveShadow = true;
+                ceiling.userData = { id: 'ceiling', type: 'ceiling' };
                 scene.add(ceiling);
+                interactables.push(ceiling);
                 
                 const gridHelper = new THREE.GridHelper(100, 100, 0x000000, 0x000000);
                 gridHelper.material.transparent = true;
                 gridHelper.material.opacity = 0.08;
                 scene.add(gridHelper);
 
-                // 构建 3D 墙体
                 const thickness = wallThickness; 
-                const solidWallMat = new THREE.MeshStandardMaterial({ color: 0xe2e4e6, roughness: 0.85 });
                 const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, transparent: true, opacity: 0.4, roughness: 0.1 });
                 const selectedGlassMat = new THREE.MeshStandardMaterial({ color: 0xffaa00, transparent: true, opacity: 0.7, roughness: 0.1, emissive: 0x664400 }); 
                 
-                const interactableWindows = []; 
-                const interactableFurniture = []; 
-
-                // 核心修复：1:1 绝对真实长度渲染，不再强行加 thickness 延伸墙体！
                 walls.forEach(w => {
                     const x1 = (w.x1 - originPos.x) / ppm;
                     const z1 = (w.y1 - originPos.y) / ppm;
@@ -121,40 +180,51 @@
                     const cx = (x1 + x2) / 2;
                     const cz = (z1 + z2) / 2;
 
-                    const createBox = (width, height, depth, yPos, material) => {
+                    const createBox = (width, height, depth, yPos, material, userData) => {
                         const geo = new THREE.BoxGeometry(width, height, depth);
                         const mesh = new THREE.Mesh(geo, material);
                         mesh.position.set(cx, yPos, cz);
                         mesh.rotation.y = angle;
                         mesh.castShadow = true;
                         mesh.receiveShadow = true;
+                        if (userData) {
+                            mesh.userData = userData;
+                            interactables.push(mesh);
+                        }
                         scene.add(mesh);
                         return mesh;
                     };
 
+                    const wColor = w.color || '#e2e4e6';
+                    // 核心修复：如果在智能联动群组中，一起发光高亮！
+                    const isWallSelected = selectedGroupIds.includes(w.id);
+                    const wallMat = new THREE.MeshStandardMaterial({ 
+                        color: wColor, roughness: 0.85,
+                        emissive: isWallSelected ? 0x222222 : 0x000000 
+                    });
+
                     if (w.type === 'solid') {
-                        createBox(thickness, wallHeight, length, wallHeight / 2, solidWallMat); 
+                        createBox(thickness, wallHeight, length, wallHeight / 2, wallMat, { id: w.id, type: 'solid' }); 
                     } else if (w.type === 'window') {
                         const sillHeight = w.sillHeight !== undefined ? w.sillHeight : 0.9; 
                         const winHeight = w.winHeight !== undefined ? w.winHeight : 1.4;  
-                        createBox(thickness, sillHeight, length, sillHeight / 2, solidWallMat); 
+                        createBox(thickness, sillHeight, length, sillHeight / 2, wallMat, { id: w.id, type: 'window' }); 
                         const headerHeight = wallHeight - sillHeight - winHeight;
                         if (headerHeight > 0) {
-                            createBox(thickness, headerHeight, length, wallHeight - headerHeight / 2, solidWallMat); 
+                            createBox(thickness, headerHeight, length, wallHeight - headerHeight / 2, wallMat, { id: w.id, type: 'window' }); 
                         }
-                        const isSelected = selectedObj?.type === 'window' && selectedObj.id === w.id;
-                        const glassMesh = createBox(thickness * 0.2, winHeight, length, sillHeight + winHeight / 2, isSelected ? selectedGlassMat : glassMat);
-                        glassMesh.userData = { id: w.id, type: 'window' };
-                        interactableWindows.push(glassMesh);
+                        // 只有被直接点中的窗户的玻璃才会变成黄色高亮
+                        const isWinSelected = selectedObj?.type === 'window' && selectedObj.id === w.id;
+                        createBox(thickness * 0.2, winHeight, length, sillHeight + winHeight / 2, isWinSelected ? selectedGlassMat : glassMat, { id: w.id, type: 'window' });
                     }
                 });
 
-                // --- 智能拐角填补 ---
                 cornerFillers.forEach(pt => {
                     const cx = (pt.x - originPos.x) / ppm;
                     const cz = (pt.y - originPos.y) / ppm;
                     const geo = new THREE.BoxGeometry(thickness, wallHeight, thickness);
-                    const mesh = new THREE.Mesh(geo, solidWallMat);
+                    const mat = new THREE.MeshStandardMaterial({ color: pt.color, roughness: 0.85 });
+                    const mesh = new THREE.Mesh(geo, mat);
                     mesh.position.set(cx, wallHeight / 2, cz);
                     mesh.castShadow = true;
                     mesh.receiveShadow = true;
@@ -268,7 +338,7 @@
                     furnitureGroup.position.set(x3d, yElev, z3d); 
                     furnitureGroup.rotation.y = -item.r * Math.PI / 180; 
                     scene.add(furnitureGroup);
-                    interactableFurniture.push(furnitureGroup); 
+                    interactables.push(furnitureGroup); // 加入检测列表
 
                     if (item.type === 'light') {
                         const pLight = new THREE.PointLight(0xfffae6, 0.6, 12);
@@ -306,26 +376,18 @@
                         mouse.y = -(currentY / window.innerHeight) * 2 + 1;
                         raycaster.setFromCamera(mouse, camera);
                         
-                        const intersectsWindows = raycaster.intersectObjects(interactableWindows);
-                        const intersectsFurniture = raycaster.intersectObjects(interactableFurniture, true);
+                        // 统一执行射线投射检测
+                        const intersects = raycaster.intersectObjects(interactables, true);
 
-                        let closest = null;
-                        let minDist = Infinity;
-
-                        if (intersectsWindows.length > 0) {
-                            closest = { id: intersectsWindows[0].object.userData.id, type: 'window' };
-                            minDist = intersectsWindows[0].distance;
-                        }
-
-                        if (intersectsFurniture.length > 0 && intersectsFurniture[0].distance < minDist) {
-                            let obj = intersectsFurniture[0].object;
+                        if (intersects.length > 0) {
+                            let obj = intersects[0].object;
                             while(obj && !obj.userData?.id) obj = obj.parent; 
                             if (obj && obj.userData?.id) {
-                                closest = { id: obj.userData.id, type: 'furniture' };
+                                setSelectedObj({ id: obj.userData.id, type: obj.userData.type });
                             }
+                        } else {
+                            setSelectedObj(null);
                         }
-
-                        if (closest) setSelectedObj(closest);
                     }
                 };
                 
@@ -375,7 +437,9 @@
                         ctx.beginPath();
                         ctx.moveTo((w.x1 - originPos.x) / ppm, (w.y1 - originPos.y) / ppm);
                         ctx.lineTo((w.x2 - originPos.x) / ppm, (w.y2 - originPos.y) / ppm);
-                        if (selectedObj?.type === 'window' && w.id === selectedObj.id) { ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 0.25; } 
+                        
+                        // 核心：雷达图中，联动的整面墙也会一起高亮显示
+                        if (selectedGroupIds.includes(w.id)) { ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 0.25; } 
                         else { ctx.strokeStyle = w.type === 'window' ? '#60a5fa' : '#374151'; ctx.lineWidth = w.type === 'window' ? 0.08 : 0.15; }
                         ctx.stroke();
                     });
@@ -428,11 +492,9 @@
                 };
                 window.addEventListener('resize', onResize);
 
-                // --- 核心修复：强制垃圾回收，防止 WebGL Context 内存泄漏卡死浏览器 ---
                 return () => {
                     cancelAnimationFrame(animationId);
                     
-                    // 解绑所有事件
                     if (container) {
                         container.removeEventListener('mousedown', onDown);
                         container.removeEventListener('touchstart', onDown);
@@ -445,7 +507,6 @@
                     document.removeEventListener('keyup', onKeyUp);
                     window.removeEventListener('resize', onResize);
                     
-                    // 释放 WebGL 内存
                     if (renderer) renderer.dispose();
                     scene.traverse((object) => {
                         if (object.isMesh) {
@@ -458,7 +519,7 @@
                     });
                     if (container) container.innerHTML = '';
                 };
-            }, [items, ppm, originPos, walls, wallHeight, wallThickness, cornerFillers, selectedObj]);
+            }, [items, ppm, originPos, walls, wallHeight, wallThickness, cornerFillers, selectedObj, floorColor, ceilingColor]);
 
             const activeWin = selectedObj?.type === 'window' ? walls.find(w => w.id === selectedObj.id) : null;
             const activeFurn = selectedObj?.type === 'furniture' ? items.find(i => i.id === selectedObj.id) : null;
@@ -475,7 +536,7 @@
                             <div className="bg-black/60 text-white p-4 rounded-lg backdrop-blur border border-white/10 hidden md:block">
                                 <h2 className="text-yellow-400 font-bold mb-1">🎮 操作说明</h2>
                                 <p className="text-sm">鼠标拖拽：环顾四周，WASD键：移动</p>
-                                <p className="text-sm mt-2 text-yellow-200 opacity-90">✨ 鼠标直接点击窗户/家具即可调整高度宽度</p>
+                                <p className="text-sm mt-2 text-yellow-200 opacity-90">✨ 鼠标点选任意 墙、地、顶、窗户、家具 即可调节参数和颜色</p>
                             </div>
                         </div>
                         <div className="pointer-events-auto bg-white/90 p-2 rounded-xl shadow-2xl backdrop-blur border-2 border-white/50 flex flex-col items-center">
@@ -484,13 +545,14 @@
                         </div>
                     </div>
 
+                    {/* 面板 1：窗户调节面板 */}
                     {activeWin && (
-                        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-[90%] max-w-2xl pointer-events-auto transition-all">
+                        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-[90%] max-w-3xl pointer-events-auto transition-all">
                             <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
-                                <h3 className="font-bold text-gray-800 flex items-center gap-2"><span className="text-xl">🪟</span> 窗户调节 (自动修补墙体)</h3>
+                                <h3 className="font-bold text-gray-800 flex items-center gap-2"><span className="text-xl">🪟</span> 窗户参数与墙框调节</h3>
                                 <button onClick={() => setSelectedObj(null)} className="text-gray-400 hover:text-red-500 font-bold text-2xl leading-none">&times;</button>
                             </div>
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-6">
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-6">
                                 <div>
                                     <div className="flex justify-between text-xs mb-1 text-gray-700"><label className="font-medium">离地高度 (窗台)</label><span className="font-bold text-amber-600">{(activeWin.sillHeight !== undefined ? activeWin.sillHeight : 0.9).toFixed(2)} m</span></div>
                                     <input type="range" min="0" max={wallHeight - 0.2} step="0.05" value={activeWin.sillHeight !== undefined ? activeWin.sillHeight : 0.9} onChange={(e) => onUpdateWall(activeWin.id, { sillHeight: Number(e.target.value), winHeight: Math.min((activeWin.winHeight !== undefined ? activeWin.winHeight : 1.4), wallHeight - Number(e.target.value)) })} className="w-full accent-amber-500" />
@@ -503,10 +565,15 @@
                                     <div className="flex justify-between text-xs mb-1 text-gray-700"><label className="font-medium">窗洞宽度 (挖墙)</label><span className="font-bold text-green-600">{(Math.hypot(activeWin.x2 - activeWin.x1, activeWin.y2 - activeWin.y1) / ppm).toFixed(2)} m</span></div>
                                     <input type="range" min="0.2" max="5" step="0.05" value={Math.hypot(activeWin.x2 - activeWin.x1, activeWin.y2 - activeWin.y1) / ppm} onChange={(e) => onUpdateWindowWidth(activeWin.id, Number(e.target.value) * ppm)} className="w-full accent-green-500" />
                                 </div>
+                                <div>
+                                    <div className="flex justify-between text-xs mb-1 text-gray-700"><label className="font-medium">墙框颜色</label></div>
+                                    <input type="color" value={activeWin.color || '#e2e4e6'} onChange={(e) => onUpdateWall(activeWin.id, { color: e.target.value })} className="w-full h-6 cursor-pointer border-0 p-0 rounded bg-white shadow-inner" />
+                                </div>
                             </div>
                         </div>
                     )}
 
+                    {/* 面板 2：家具调节面板 */}
                     {activeFurn && (
                         <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-purple-200 z-30 w-[90%] max-w-2xl pointer-events-auto transition-all">
                             <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
@@ -533,6 +600,36 @@
                             </div>
                         </div>
                     )}
+
+                    {/* 面板 3：环境颜色涂装面板 (地面/天花板/墙壁) */}
+                    {(selectedObj?.type === 'solid' || selectedObj?.type === 'floor' || selectedObj?.type === 'ceiling') && (
+                        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-gray-200 z-30 w-[90%] max-w-sm pointer-events-auto transition-all">
+                            <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
+                                <h3 className="font-bold text-gray-800 flex items-center gap-2">
+                                    <span className="text-xl">🎨</span> 
+                                    {selectedObj.type === 'floor' ? '地面颜色调色板' : selectedObj.type === 'ceiling' ? '天花板颜色调色板' : '这堵墙的调色板'}
+                                </h3>
+                                <button onClick={() => setSelectedObj(null)} className="text-gray-400 hover:text-red-500 font-bold text-2xl leading-none">&times;</button>
+                            </div>
+                            <div className="flex justify-between items-center bg-gray-50 p-2 rounded-lg border border-gray-100 shadow-inner">
+                                <label className="text-sm font-medium text-gray-700">点击右侧色块修改 ➔</label>
+                                <input 
+                                    type="color" 
+                                    value={
+                                        selectedObj.type === 'floor' ? floorColor : 
+                                        selectedObj.type === 'ceiling' ? ceilingColor : 
+                                        walls.find(w => w.id === selectedObj.id)?.color || '#e2e4e6'
+                                    }
+                                    onChange={(e) => {
+                                        if (selectedObj.type === 'floor') onUpdateFloorColor(e.target.value);
+                                        else if (selectedObj.type === 'ceiling') onUpdateCeilingColor(e.target.value);
+                                        else onUpdateWall(selectedObj.id, { color: e.target.value });
+                                    }}
+                                    className="w-16 h-8 cursor-pointer border border-gray-300 p-0 rounded shadow-sm bg-white"
+                                />
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
@@ -556,6 +653,10 @@
             const [tempLine, setTempLine] = useState(null);
             const [guides, setGuides] = useState([]);
             const [snapPoint, setSnapPoint] = useState(null); 
+            
+            // --- 新增：全局环境颜色状态 ---
+            const [floorColor, setFloorColor] = useState('#7a7c7f');
+            const [ceilingColor, setCeilingColor] = useState('#f5f5f5');
 
             const [isFurnitureExpanded, setIsFurnitureExpanded] = useState(false);
 
@@ -568,11 +669,37 @@
             const [selectedId, setSelectedId] = useState(null);
             const [selectedWallId, setSelectedWallId] = useState(null);
             
+            // --- 2D选中群组状态（用于选中某段墙时高亮整条直线） ---
+            const selected2DGroupIds = useMemo(() => {
+                if (selectedWallId) return getCollinearGroup(selectedWallId, walls);
+                return [];
+            }, [selectedWallId, walls]);
+            
             const [toast, setToast] = useState('');
             const [modal, setModal] = useState(null);
             const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
-            const handleUpdateWall = (id, updates) => setWalls(prevWalls => prevWalls.map(w => w.id === id ? { ...w, ...updates } : w));
+            // --- 核心优化：颜色修改会智能应用到该墙的所有联动段落（左右墙与窗框） ---
+            const handleUpdateWall = (id, updates) => {
+                setWalls(prevWalls => {
+                    let nextWalls = [...prevWalls];
+                    
+                    // 如果有颜色的更新，同步给同一直线上的所有墙和窗户
+                    if (updates.color !== undefined) {
+                        const groupIds = getCollinearGroup(id, prevWalls);
+                        nextWalls = nextWalls.map(w => groupIds.includes(w.id) ? { ...w, color: updates.color } : w);
+                    }
+                    
+                    // 仅对当前指定的单个对象应用高度等专属更新 (防止把整面墙变成窗户)
+                    const otherUpdates = { ...updates };
+                    delete otherUpdates.color;
+                    if (Object.keys(otherUpdates).length > 0) {
+                        nextWalls = nextWalls.map(w => w.id === id ? { ...w, ...otherUpdates } : w);
+                    }
+                    return nextWalls;
+                });
+            };
+
             const handleUpdateItem = (id, updates) => setItems(prevItems => prevItems.map(i => i.id === id ? { ...i, ...updates } : i));
             
             const handleUpdateWindowWidth = (id, newLogicalWidth) => {
@@ -613,7 +740,7 @@
 
             const handleSave = () => {
                 if (!saveName.trim()) return showToast("请输入存档名称！");
-                const newSave = { id: Date.now().toString(), name: saveName, walls, items, ppm, originPos, wallHeight, wallThickness, bgImage: bgImage };
+                const newSave = { id: Date.now().toString(), name: saveName, walls, items, ppm, originPos, wallHeight, wallThickness, floorColor, ceilingColor, bgImage: bgImage };
                 try {
                     const newArr = [...savedLayouts, newSave];
                     localStorage.setItem('myFloorPlans', JSON.stringify(newArr));
@@ -632,7 +759,9 @@
                 if (target) {
                     setWalls(target.walls || []); setItems(target.items || []); setPpm(target.ppm || 120);
                     setOriginPos(target.originPos || { x: 250, y: 250 }); setWallHeight(target.wallHeight || 2.6);
-                    setWallThickness(target.wallThickness || 0.2); if (target.bgImage) setBgImage(target.bgImage);
+                    setWallThickness(target.wallThickness || 0.2); 
+                    setFloorColor(target.floorColor || '#7a7c7f'); setCeilingColor(target.ceilingColor || '#f5f5f5');
+                    if (target.bgImage) setBgImage(target.bgImage);
                     showToast("读取成功！");
                 }
             };
@@ -857,11 +986,16 @@
                                     let minT = Math.max(0, Math.min(1, Math.min(t1, t2))); let maxT = Math.max(0, Math.min(1, Math.max(t1, t2)));
 
                                     if (maxT - minT > 0.02) { 
+                                        // 核心：被窗户新切开的实体墙，继承原来实体墙的颜色
                                         if (minT > 0.02) resultWalls.push({ ...wall, id: Date.now() + Math.random().toString(), x2: wall.x1 + minT*(wall.x2-wall.x1), y2: wall.y1 + minT*(wall.y2-wall.y1) });
                                         if (maxT < 0.98) resultWalls.push({ ...wall, id: Date.now() + Math.random().toString(), x1: wall.x1 + maxT*(wall.x2-wall.x1), y1: wall.y1 + maxT*(wall.y2-wall.y1) });
                                     } else { resultWalls.push(wall); }
                                 } else { resultWalls.push(wall); }
                             });
+                            // 继承被覆盖墙的颜色给窗户
+                            const overlappedWall = walls.find(w => w.type === 'solid' && pointToSegment(w1.x, w1.y, w.x1, w.y1, w.x2, w.y2).dist < 10);
+                            if (overlappedWall && overlappedWall.color) newElement.color = overlappedWall.color;
+                            
                             setWalls([...resultWalls, newElement]);
                         } else setWalls([...walls, newElement]);
                     }
@@ -870,11 +1004,7 @@
                 setDraggingId(null);
             };
 
-            // --- 核心修复：添加依赖，防止无限制监听绑定 ---
-            useEffect(() => { 
-                window.addEventListener('pointerup', handlePointerUp); 
-                return () => window.removeEventListener('pointerup', handlePointerUp); 
-            }, [drawMode, tempLine, walls]);
+            useEffect(() => { window.addEventListener('pointerup', handlePointerUp); return () => window.removeEventListener('pointerup', handlePointerUp); }, [drawMode, tempLine, walls]);
 
             useEffect(() => {
                 const handleKeyDown = (e) => {
@@ -891,18 +1021,18 @@
                         else return;
 
                         e.preventDefault(); 
-                        setWalls(prev => prev.map(w => 
-                            w.id === selectedWallId 
-                            ? { ...w, x1: w.x1 + dx, y1: w.y1 + dy, x2: w.x2 + dx, y2: w.y2 + dy } 
-                            : w
-                        ));
+                        setWalls(prev => {
+                            // 核心：在 2D 里移动时，联动群组 (被窗户切开的同一条墙) 一起平行移动
+                            const groupIds = getCollinearGroup(selectedWallId, prev);
+                            return prev.map(w => groupIds.includes(w.id) ? { ...w, x1: w.x1 + dx, y1: w.y1 + dy, x2: w.x2 + dx, y2: w.y2 + dy } : w)
+                        });
                     }
                 };
                 window.addEventListener('keydown', handleKeyDown);
                 return () => window.removeEventListener('keydown', handleKeyDown);
             }, [viewMode, selectedWallId, drawMode]);
 
-            // --- 核心修复：使用 useMemo 缓存墙角渲染计算，防止性能崩溃 ---
+            // 缓存拐角柱体的计算
             const cornerFillers = useMemo(() => {
                 const fillers = [];
                 const seenCorners = new Set();
@@ -926,7 +1056,7 @@
                             });
                         });
                         if (isCorner) {
-                            fillers.push({ x: p1.x, y: p1.y });
+                            fillers.push({ x: p1.x, y: p1.y, color: w1.color || '#e2e4e6' });
                             seenCorners.add(key);
                         }
                     });
@@ -934,7 +1064,7 @@
                 return fillers;
             }, [walls]);
 
-            if (viewMode === '3d') return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} wallThickness={wallThickness} cornerFillers={cornerFillers} onUpdateWall={handleUpdateWall} onUpdateWindowWidth={handleUpdateWindowWidth} onUpdateItem={handleUpdateItem} onExit={() => setViewMode('2d')} />;
+            if (viewMode === '3d') return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} wallThickness={wallThickness} cornerFillers={cornerFillers} floorColor={floorColor} ceilingColor={ceilingColor} onUpdateWall={handleUpdateWall} onUpdateWindowWidth={handleUpdateWindowWidth} onUpdateItem={handleUpdateItem} onUpdateFloorColor={setFloorColor} onUpdateCeilingColor={setCeilingColor} onExit={() => setViewMode('2d')} />;
 
             return (
                 <div className="flex flex-col md:flex-row h-screen w-screen overflow-hidden font-sans text-gray-800">
@@ -1013,7 +1143,7 @@
                                 <button onClick={() => setDrawMode('solid')} className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'solid' ? 'bg-gray-800 text-white border-gray-800 shadow-inner' : 'bg-white text-gray-700 hover:bg-gray-100'}`}>{drawMode === 'solid' ? '🔴 画墙中' : '✏️ 画墙壁'}</button>
                                 <button onClick={() => setDrawMode('window')} className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'window' ? 'bg-blue-500 text-white border-blue-500 shadow-inner' : 'bg-white text-blue-600 hover:bg-blue-50'}`}>{drawMode === 'window' ? '🔴 画窗中' : '🪟 画窗户'}</button>
                             </div>
-                            {walls.length > 0 && <div className="flex justify-between items-center mt-2 border-t border-blue-200 pt-2"><span className="text-xs text-blue-700">已画线段: {walls.length} 条</span>{drawMode === 'none' && <span className="text-xs text-amber-600 font-bold animate-pulse">可点选图纸删除墙</span>}</div>}
+                            {walls.length > 0 && <div className="flex justify-between items-center mt-2 border-t border-blue-200 pt-2"><span className="text-xs text-blue-700">已画线段: {walls.length} 条</span>{drawMode === 'none' && <span className="text-xs text-amber-600 font-bold animate-pulse">可点选图纸修改墙</span>}</div>}
                         </div>
 
                         <div className="mb-4">
@@ -1074,6 +1204,21 @@
                             )}
                         </div>
 
+                        {/* 新增：全局环境颜色控制面板 */}
+                        <div className="mb-4 bg-orange-50 p-3 rounded-lg border border-orange-200">
+                            <h2 className="text-sm font-bold text-orange-800 mb-2">5. 整体环境颜色</h2>
+                            <div className="flex gap-4 text-xs">
+                                <div className="flex items-center gap-2 flex-1">
+                                    <label className="text-orange-700 font-medium">地面:</label>
+                                    <input type="color" value={floorColor} onChange={e => setFloorColor(e.target.value)} className="w-full h-8 border-0 p-0 rounded cursor-pointer bg-white shadow-inner" />
+                                </div>
+                                <div className="flex items-center gap-2 flex-1">
+                                    <label className="text-orange-700 font-medium">天花板:</label>
+                                    <input type="color" value={ceilingColor} onChange={e => setCeilingColor(e.target.value)} className="w-full h-8 border-0 p-0 rounded cursor-pointer bg-white shadow-inner" />
+                                </div>
+                            </div>
+                        </div>
+
                         {(selectedId && selectedId !== 'ruler' && selectedId !== 'origin' && drawMode === 'none') && (() => {
                             const selItem = items.find(i=>i.id===selectedId);
                             if(!selItem) return null;
@@ -1081,7 +1226,7 @@
                             <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mt-auto shadow-sm">
                                 <div className="flex justify-between items-center mb-2">
                                     <p className="text-xs font-bold text-gray-800">编辑选中物品</p>
-                                    <input type="color" value={selItem.color || '#000000'} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, color: e.target.value}:i))} className="w-5 h-5 p-0 border-0 rounded cursor-pointer" title="修改颜色" />
+                                    <input type="color" value={selItem.color || '#000000'} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, color: e.target.value}:i))} className="w-5 h-5 p-0 border-0 rounded cursor-pointer shadow-inner" title="修改颜色" />
                                 </div>
                                 
                                 <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
@@ -1101,7 +1246,16 @@
                         
                         {(selectedWallId && drawMode === 'none') && (
                             <div className="bg-red-50 p-3 rounded-lg border border-red-200 mt-auto">
-                                <p className="text-xs font-bold text-red-800 mb-1">编辑选中墙体 / 窗户</p>
+                                <div className="flex justify-between items-center mb-1">
+                                    <p className="text-xs font-bold text-red-800">编辑选中墙体 / 窗户</p>
+                                    <input 
+                                        type="color" 
+                                        value={walls.find(w => w.id === selectedWallId)?.color || '#e2e4e6'}
+                                        onChange={(e) => handleUpdateWall(selectedWallId, { color: e.target.value })}
+                                        className="w-5 h-5 p-0 border-0 rounded cursor-pointer shadow-inner"
+                                        title="修改墙体颜色"
+                                    />
+                                </div>
                                 <p className="text-[10px] text-red-600 mb-2 leading-tight">💡 提示: 选中后可使用键盘 <b>↑ ↓ ← → 方向键</b> (按住 Shift 加速) 进行精确平移。</p>
                                 <button onClick={() => {setWalls(walls.filter(w=>w.id !== selectedWallId)); setSelectedWallId(null);}} className="w-full bg-red-600 text-white hover:bg-red-700 py-2 rounded text-xs font-bold transition shadow-sm">
                                     🗑️ 删除选中线段
@@ -1139,16 +1293,15 @@
                                 return null;
                             })}
 
-                            {/* 智能填补的真正的转角处绘制 */}
                             {cornerFillers.map((pt, i) => (
                                 <rect key={`cf-${i}`}
                                     x={pt.x * zoom - (wallThickness * ppm * zoom) / 2}
                                     y={pt.y * zoom - (wallThickness * ppm * zoom) / 2}
                                     width={wallThickness * ppm * zoom}
                                     height={wallThickness * ppm * zoom}
-                                    fill="#1f2937"
+                                    fill={pt.color || '#1f2937'}
                                     opacity={0.9}
-                                    className="pointer-events-none"
+                                    className="pointer-events-none transition-colors"
                                 />
                             ))}
                             
@@ -1164,11 +1317,11 @@
                                         onPointerDown={(e) => handlePointerDown(e, `wall_${w.id}`, 0, 0)}
                                         strokeLinecap="butt"
                                     />
-                                    {/* 核心修复：摒弃原有的 square cap，使用绝对精度的 butt cap，消除假缝隙假重合 */}
                                     <line 
                                         x1={w.x1 * zoom} y1={w.y1 * zoom} 
                                         x2={w.x2 * zoom} y2={w.y2 * zoom}
-                                        stroke={selectedWallId === w.id ? '#ef4444' : (w.type === 'window' ? '#3b82f6' : '#1f2937')} 
+                                        // 核心：在 2D 图纸上，只要选中群组内的一部分，整条相连直线的边框均标红
+                                        stroke={selected2DGroupIds.includes(w.id) ? '#ef4444' : (w.type === 'window' ? '#3b82f6' : (w.color || '#1f2937'))} 
                                         strokeWidth={wallThickness * ppm * zoom} 
                                         strokeLinecap="butt" 
                                         opacity={w.type === 'window' ? 0.7 : 0.9}
