@@ -23,7 +23,6 @@
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
         
-        /* 3D 准星样式 */
         #crosshair {
             position: absolute; top: 50%; left: 50%; width: 20px; height: 20px;
             transform: translate(-50%, -50%); pointer-events: none; opacity: 0.8; z-index: 10;
@@ -31,8 +30,6 @@
         #crosshair::before, #crosshair::after { content: ''; position: absolute; background: white; box-shadow: 0 0 2px rgba(0,0,0,0.5); }
         #crosshair::before { top: 9px; left: 0; width: 20px; height: 2px; }
         #crosshair::after { top: 0; left: 9px; width: 2px; height: 20px; }
-        
-        /* 绘制时的十字光标 */
         .cursor-drawing { cursor: crosshair !important; }
     </style>
 </head>
@@ -45,9 +42,12 @@
         // ==========================================
         // 3D 视图组件
         // ==========================================
-        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, onExit }) => {
+        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, onUpdateWall, onExit }) => {
             const mountRef = useRef(null);
             const minimapRef = useRef(null);
+            
+            // 当前在 3D 中被选中的窗户 ID
+            const [selectedWinId, setSelectedWinId] = useState(null);
 
             useEffect(() => {
                 let animationId;
@@ -58,7 +58,7 @@
                 scene.fog = new THREE.Fog(0xf0f4f8, 2, 20);
 
                 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
-                camera.position.set(0, 1.6, 0); // 默认位置
+                camera.position.set(0, 1.6, 0); 
                 camera.rotation.order = 'YXZ';
 
                 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -67,16 +67,11 @@
                 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
                 container.appendChild(renderer.domElement);
 
-                // --- 优化的全局补光系统 ---
-                // 1. 基础环境光，稍微提亮
                 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
-                
-                // 2. 半球光：模拟天空发出的光和地面的反光，确保没有房间会“死黑”
                 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.4);
                 hemiLight.position.set(0, 20, 0);
                 scene.add(hemiLight);
 
-                // 3. 主平行光（模拟阳光）
                 const dirLight = new THREE.DirectionalLight(0xffffff, 0.3);
                 dirLight.position.set(5, 10, 5);
                 dirLight.castShadow = true;
@@ -94,11 +89,15 @@
                 gridHelper.material.opacity = 0.1;
                 scene.add(gridHelper);
 
-                // --- 根据用户绘制的线条动态生成 3D 墙体 ---
+                // --- 构建 3D 墙体与可交互的窗户 ---
                 const thickness = 0.15;
                 const solidWallMat = new THREE.MeshStandardMaterial({ color: 0xe2e4e6, roughness: 0.85 });
                 const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, transparent: true, opacity: 0.4, roughness: 0.1 });
+                // 被选中的窗户发黄光
+                const selectedGlassMat = new THREE.MeshStandardMaterial({ color: 0xffaa00, transparent: true, opacity: 0.7, roughness: 0.1, emissive: 0x664400 }); 
                 
+                const interactableWindows = []; // 用于存放用于检测点击的窗户玻璃 Mesh
+
                 walls.forEach(w => {
                     const x1 = (w.x1 - originPos.x) / ppm;
                     const z1 = (w.y1 - originPos.y) / ppm;
@@ -118,46 +117,54 @@
                         mesh.castShadow = true;
                         mesh.receiveShadow = true;
                         scene.add(mesh);
+                        return mesh;
                     };
 
                     if (w.type === 'solid') {
                         createBox(thickness, wallHeight, length + thickness * 0.5, wallHeight / 2, solidWallMat);
                     } else if (w.type === 'window') {
-                        const sillHeight = 0.9; 
-                        const winHeight = 1.4;  
+                        // 读取用户自定义高度，若无则给默认值
+                        const sillHeight = w.sillHeight !== undefined ? w.sillHeight : 0.9; 
+                        const winHeight = w.winHeight !== undefined ? w.winHeight : 1.4;  
+                        
+                        // 下墙(窗台)
                         createBox(thickness, sillHeight, length + thickness * 0.5, sillHeight / 2, solidWallMat);
+                        
+                        // 上墙(横梁)
                         const headerHeight = wallHeight - sillHeight - winHeight;
                         if (headerHeight > 0) {
                             createBox(thickness, headerHeight, length + thickness * 0.5, wallHeight - headerHeight / 2, solidWallMat);
                         }
-                        createBox(thickness * 0.2, winHeight, length, sillHeight + winHeight / 2, glassMat);
+                        
+                        // 玻璃
+                        const isSelected = w.id === selectedWinId;
+                        const glassMesh = createBox(thickness * 0.2, winHeight, length, sillHeight + winHeight / 2, isSelected ? selectedGlassMat : glassMat);
+                        // 为玻璃绑定 ID 供点击检测使用
+                        glassMesh.userData = { id: w.id, type: 'window' };
+                        interactableWindows.push(glassMesh);
                     }
                 });
 
-                // --- 将 2D 家具与光源映射到 3D 空间 ---
+                // 将 2D 家具映射到 3D
                 items.forEach(item => {
                     const x3d = (item.x - originPos.x) / ppm + item.w / 2;
                     const z3d = (item.y - originPos.y) / ppm + item.h / 2;
 
                     if (item.type === 'light') {
-                        // 如果是吸顶灯，在天花板位置创建一个发光圆盘和一个点光源
                         const lightGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.05, 16);
-                        const lightMat = new THREE.MeshBasicMaterial({ color: 0xfffae6 }); // 发光材质（不受阴影影响）
+                        const lightMat = new THREE.MeshBasicMaterial({ color: 0xfffae6 });
                         const lightMesh = new THREE.Mesh(lightGeo, lightMat);
-                        lightMesh.position.set(x3d, wallHeight - 0.025, z3d); // 贴近天花板
+                        lightMesh.position.set(x3d, wallHeight - 0.025, z3d);
                         scene.add(lightMesh);
 
-                        // 真实的点光源，照亮下方的房间
-                        const pLight = new THREE.PointLight(0xfffae6, 0.6, 12); // 柔和的暖白光，照亮半径12米
+                        const pLight = new THREE.PointLight(0xfffae6, 0.6, 12);
                         pLight.position.set(x3d, wallHeight - 0.2, z3d);
                         pLight.castShadow = true;
                         scene.add(pLight);
                     } else {
-                        // 如果是普通家具
                         const itemGeo = new THREE.BoxGeometry(item.w, 0.75, item.h); 
                         const itemMat = new THREE.MeshStandardMaterial({ color: item.color });
                         const mesh = new THREE.Mesh(itemGeo, itemMat);
-                        
                         mesh.position.set(x3d, 0.75 / 2, z3d);
                         mesh.rotation.y = -item.r * Math.PI / 180;
                         mesh.castShadow = true;
@@ -166,15 +173,47 @@
                     }
                 });
 
-                // 控制逻辑
+                // --- 交互与光线投射 (Raycasting) 逻辑 ---
                 const moveState = { forward: false, backward: false, left: false, right: false };
                 let isDragging = false, prevMouse = { x: 0, y: 0 }, yaw = 0, pitch = 0;
+                let clickStartX = 0, clickStartY = 0;
+                
+                const raycaster = new THREE.Raycaster();
+                const mouse = new THREE.Vector2();
 
-                const onDown = (e) => { isDragging = true; prevMouse = { x: e.clientX||e.touches[0].clientX, y: e.clientY||e.touches[0].clientY }; };
-                const onUp = () => { isDragging = false; };
+                const onDown = (e) => { 
+                    isDragging = true; 
+                    clickStartX = e.clientX||e.touches?.[0].clientX;
+                    clickStartY = e.clientY||e.touches?.[0].clientY;
+                    prevMouse = { x: clickStartX, y: clickStartY }; 
+                };
+                
+                const onUp = (e) => { 
+                    isDragging = false; 
+                    // 检查是拖动还是单纯的点击
+                    const currentX = e.clientX || (e.changedTouches ? e.changedTouches[0].clientX : clickStartX);
+                    const currentY = e.clientY || (e.changedTouches ? e.changedTouches[0].clientY : clickStartY);
+                    
+                    if (Math.abs(currentX - clickStartX) < 5 && Math.abs(currentY - clickStartY) < 5) {
+                        // 判定为点击，执行射线检测
+                        mouse.x = (currentX / window.innerWidth) * 2 - 1;
+                        mouse.y = -(currentY / window.innerHeight) * 2 + 1;
+                        raycaster.setFromCamera(mouse, camera);
+                        
+                        const intersects = raycaster.intersectObjects(interactableWindows);
+                        if (intersects.length > 0) {
+                            // 选到了窗户
+                            setSelectedWinId(intersects[0].object.userData.id);
+                        } else {
+                            // 点击了空白处或墙壁，取消选中
+                            setSelectedWinId(null);
+                        }
+                    }
+                };
+                
                 const onMove = (e) => {
                     if (!isDragging) return;
-                    const clientX = e.clientX||e.touches[0].clientX, clientY = e.clientY||e.touches[0].clientY;
+                    const clientX = e.clientX||e.touches?.[0].clientX, clientY = e.clientY||e.touches?.[0].clientY;
                     yaw -= (clientX - prevMouse.x) * 0.004;
                     pitch -= (clientY - prevMouse.y) * 0.004;
                     pitch = Math.max(-Math.PI/2+0.1, Math.min(Math.PI/2-0.1, pitch));
@@ -208,23 +247,25 @@
                     ctx.scale(scale, scale);
                     ctx.translate(-camera.position.x * 0.5, -camera.position.z * 0.5);
 
-                    // 画墙壁
                     walls.forEach(w => {
                         ctx.beginPath();
                         ctx.moveTo((w.x1 - originPos.x) / ppm, (w.y1 - originPos.y) / ppm);
                         ctx.lineTo((w.x2 - originPos.x) / ppm, (w.y2 - originPos.y) / ppm);
-                        ctx.strokeStyle = w.type === 'window' ? '#60a5fa' : '#374151'; 
-                        ctx.lineWidth = w.type === 'window' ? 0.08 : 0.15;
+                        if (w.id === selectedWinId) {
+                            ctx.strokeStyle = '#f59e0b'; // 雷达上选中的窗户变黄
+                            ctx.lineWidth = 0.25;
+                        } else {
+                            ctx.strokeStyle = w.type === 'window' ? '#60a5fa' : '#374151'; 
+                            ctx.lineWidth = w.type === 'window' ? 0.08 : 0.15;
+                        }
                         ctx.stroke();
                     });
 
-                    // 画玩家红点
                     ctx.fillStyle = '#ef4444';
                     ctx.beginPath();
                     ctx.arc(camera.position.x, camera.position.z, 0.3, 0, Math.PI * 2);
                     ctx.fill();
 
-                    // 画视角方向
                     const dir = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
                     ctx.beginPath();
                     ctx.moveTo(camera.position.x, camera.position.z);
@@ -272,7 +313,25 @@
                     window.removeEventListener('resize', onResize);
                     if (container) container.innerHTML = '';
                 };
-            }, [items, ppm, originPos, walls, wallHeight]); 
+            }, [items, ppm, originPos, walls, wallHeight, selectedWinId]); // 将 selectedWinId 加入依赖以触发高亮渲染
+
+            // 获取当前选中的窗户数据以供 UI 面板使用
+            const activeWin = walls.find(w => w.id === selectedWinId);
+            
+            // 窗户调整逻辑，确保窗户+窗台不能大于墙高
+            const handleSillChange = (e) => {
+                let v = Number(e.target.value);
+                let currentWinH = activeWin.winHeight !== undefined ? activeWin.winHeight : 1.4;
+                if (v + currentWinH > wallHeight) currentWinH = Math.max(0.1, wallHeight - v);
+                onUpdateWall(selectedWinId, { sillHeight: v, winHeight: currentWinH });
+            };
+            
+            const handleWinChange = (e) => {
+                let v = Number(e.target.value);
+                let currentSill = activeWin.sillHeight !== undefined ? activeWin.sillHeight : 0.9;
+                if (currentSill + v > wallHeight) currentSill = Math.max(0, wallHeight - v);
+                onUpdateWall(selectedWinId, { sillHeight: currentSill, winHeight: v });
+            };
 
             return (
                 <div className="relative w-full h-screen bg-black overflow-hidden">
@@ -287,6 +346,7 @@
                                 <h2 className="text-yellow-400 font-bold mb-1">🎮 操作说明</h2>
                                 <p className="text-sm">鼠标拖拽：环顾四周</p>
                                 <p className="text-sm">WASD键：移动漫游</p>
+                                <p className="text-sm mt-2 text-yellow-200 opacity-90">✨ 鼠标点击窗户即可调整高度</p>
                             </div>
                         </div>
                         <div className="pointer-events-auto bg-white/90 p-2 rounded-xl shadow-2xl backdrop-blur border-2 border-white/50 flex flex-col items-center">
@@ -294,6 +354,48 @@
                             <canvas ref={minimapRef} width="180" height="180" className="bg-gray-100 rounded border border-gray-300"></canvas>
                         </div>
                     </div>
+
+                    {/* --- 新增：浮动在 3D 上的窗户编辑面板 --- */}
+                    {activeWin && (
+                        <div className="absolute right-4 top-1/2 transform -translate-y-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-72 pointer-events-auto transition-all">
+                            <div className="flex justify-between items-center mb-4">
+                                <h3 className="font-bold text-gray-800 flex items-center gap-2"><span className="text-xl">🪟</span> 窗户高度调节</h3>
+                                <button onClick={() => setSelectedWinId(null)} className="text-gray-400 hover:text-red-500 font-bold text-lg leading-none">&times;</button>
+                            </div>
+                            
+                            <div className="space-y-5">
+                                <div>
+                                    <div className="flex justify-between text-sm mb-1 text-gray-700">
+                                        <label className="font-medium">离地高度 (窗台)</label>
+                                        <span className="font-bold text-amber-600">{(activeWin.sillHeight !== undefined ? activeWin.sillHeight : 0.9).toFixed(2)} m</span>
+                                    </div>
+                                    <input type="range" 
+                                        min="0" max={wallHeight - 0.2} step="0.05" 
+                                        value={activeWin.sillHeight !== undefined ? activeWin.sillHeight : 0.9} 
+                                        onChange={handleSillChange}
+                                        className="w-full accent-amber-500" 
+                                    />
+                                </div>
+                                
+                                <div>
+                                    <div className="flex justify-between text-sm mb-1 text-gray-700">
+                                        <label className="font-medium">窗户自身高度</label>
+                                        <span className="font-bold text-blue-600">{(activeWin.winHeight !== undefined ? activeWin.winHeight : 1.4).toFixed(2)} m</span>
+                                    </div>
+                                    <input type="range" 
+                                        min="0.2" max={wallHeight} step="0.05" 
+                                        value={activeWin.winHeight !== undefined ? activeWin.winHeight : 1.4} 
+                                        onChange={handleWinChange}
+                                        className="w-full accent-blue-500" 
+                                    />
+                                </div>
+                                
+                                <div className="pt-3 border-t border-gray-100 text-xs text-gray-400 text-center">
+                                    调整完毕后，数据会自动绑定，并在退出时保存到存档中。
+                                </div>
+                            </div>
+                        </div>
+                    )}
                 </div>
             );
         };
@@ -317,12 +419,73 @@
 
             const [customConfig, setCustomConfig] = useState({ name: '自定义物品', w: 1.0, h: 1.0, color: '#8b5cf6' });
 
-            // 预置了一个桌子和一个吸顶灯
             const [items, setItems] = useState([
                 { id: 1, name: '办公桌', w: 1.8, h: 0.6, x: 400, y: 150, r: 0, color: '#d97706', type: 'furniture' },
                 { id: 2, name: '吸顶灯', w: 0.6, h: 0.6, x: 450, y: 250, r: 0, color: '#fef08a', type: 'light' }
             ]);
             const [selectedId, setSelectedId] = useState(null);
+            
+            // --- 新增：专门用于更新特定墙体/窗户属性的方法 ---
+            const handleUpdateWall = (id, updates) => {
+                setWalls(prevWalls => prevWalls.map(w => w.id === id ? { ...w, ...updates } : w));
+            };
+
+            const [savedLayouts, setSavedLayouts] = useState([]);
+            const [saveName, setSaveName] = useState('');
+            const [selectedSaveId, setSelectedSaveId] = useState('');
+
+            useEffect(() => {
+                const stored = localStorage.getItem('myFloorPlans');
+                if (stored) {
+                    try { setSavedLayouts(JSON.parse(stored)); } catch(e) {}
+                }
+            }, []);
+
+            const handleSave = () => {
+                if (!saveName.trim()) return alert("请输入存档名称！");
+                const newSave = {
+                    id: Date.now().toString(),
+                    name: saveName,
+                    walls, items, ppm, originPos, wallHeight, 
+                    bgImage: bgImage 
+                };
+                
+                try {
+                    const newArr = [...savedLayouts, newSave];
+                    localStorage.setItem('myFloorPlans', JSON.stringify(newArr));
+                    setSavedLayouts(newArr);
+                    setSaveName('');
+                    alert("存档保存成功！");
+                } catch (e) {
+                    alert("保存失败：图片过大导致超出存储限制。已为您剔除底图重试。");
+                    const noImgArr = [...savedLayouts, { ...newSave, bgImage: null }];
+                    localStorage.setItem('myFloorPlans', JSON.stringify(noImgArr));
+                    setSavedLayouts(noImgArr);
+                    setSaveName('');
+                }
+            };
+
+            const handleLoad = () => {
+                if (!selectedSaveId) return alert("请先选择一个存档！");
+                const target = savedLayouts.find(s => s.id === selectedSaveId);
+                if (target) {
+                    setWalls(target.walls || []);
+                    setItems(target.items || []);
+                    setPpm(target.ppm || 120);
+                    setOriginPos(target.originPos || { x: 250, y: 250 });
+                    setWallHeight(target.wallHeight || 2.6);
+                    if (target.bgImage) setBgImage(target.bgImage);
+                    alert("读取成功！");
+                }
+            };
+
+            const handleDeleteSave = () => {
+                if (!selectedSaveId) return;
+                const newArr = savedLayouts.filter(s => s.id !== selectedSaveId);
+                localStorage.setItem('myFloorPlans', JSON.stringify(newArr));
+                setSavedLayouts(newArr);
+                setSelectedSaveId('');
+            };
             
             const addCustomItem = () => {
                 setDrawMode('none');
@@ -340,13 +503,37 @@
 
             const containerRef = useRef(null);
 
-            const SNAP_DIST = 15;
+            const pointToSegment = (x, y, x1, y1, x2, y2) => {
+                const l2 = (x2 - x1)**2 + (y2 - y1)**2;
+                if (l2 === 0) return { dist: Math.hypot(x - x1, y - y1), x: x1, y: y1 };
+                let t = ((x - x1) * (x2 - x1) + (y - y1) * (y2 - y1)) / l2;
+                t = Math.max(0, Math.min(1, t));
+                const nx = x1 + t * (x2 - x1);
+                const ny = y1 + t * (y2 - y1);
+                return { dist: Math.hypot(x - nx, y - ny), x: nx, y: ny };
+            };
+
+            const SNAP_DIST = 20; 
             const getSnappedPoint = (x, y, currentWalls) => {
+                let bestDist = SNAP_DIST;
+                let bestPt = { x, y, snapped: false };
+
                 for (let w of currentWalls) {
-                    if (Math.hypot(w.x1 - x, w.y1 - y) < SNAP_DIST) return { x: w.x1, y: w.y1, snapped: true };
-                    if (Math.hypot(w.x2 - x, w.y2 - y) < SNAP_DIST) return { x: w.x2, y: w.y2, snapped: true };
+                    const d1 = Math.hypot(w.x1 - x, w.y1 - y);
+                    if (d1 < bestDist) { bestDist = d1; bestPt = { x: w.x1, y: w.y1, snapped: true }; }
+                    const d2 = Math.hypot(w.x2 - x, w.y2 - y);
+                    if (d2 < bestDist) { bestDist = d2; bestPt = { x: w.x2, y: w.y2, snapped: true }; }
                 }
-                return { x, y, snapped: false };
+                if (bestPt.snapped) return bestPt;
+
+                for (let w of currentWalls) {
+                    const proj = pointToSegment(x, y, w.x1, w.y1, w.x2, w.y2);
+                    if (proj.dist < bestDist) {
+                        bestDist = proj.dist;
+                        bestPt = { x: proj.x, y: proj.y, snapped: true };
+                    }
+                }
+                return bestPt;
             };
 
             const processImageSrc = (src) => {
@@ -424,8 +611,8 @@
                     } else {
                         const dx = Math.abs(nx - tempLine.x1);
                         const dy = Math.abs(ny - tempLine.y1);
-                        if (dx > dy * 2) ny = tempLine.y1;
-                        else if (dy > dx * 2) nx = tempLine.x1;
+                        if (dx > dy * 1.5) ny = tempLine.y1;
+                        else if (dy > dx * 1.5) nx = tempLine.x1;
                     }
 
                     setTempLine(prev => ({ ...prev, x2: nx, y2: ny }));
@@ -448,8 +635,13 @@
             const handlePointerUp = () => {
                 if (drawMode !== 'none' && tempLine) {
                     const dist = Math.hypot(tempLine.x2 - tempLine.x1, tempLine.y2 - tempLine.y1);
-                    if (dist > 10) { 
-                        setWalls([...walls, { id: Date.now(), ...tempLine, type: drawMode }]);
+                    if (dist > 5) { 
+                        // 在 2D 中画完窗户，自动携带默认高度数据保存
+                        setWalls([...walls, { 
+                            id: Date.now(), ...tempLine, type: drawMode,
+                            sillHeight: drawMode === 'window' ? 0.9 : undefined,
+                            winHeight: drawMode === 'window' ? 1.4 : undefined 
+                        }]);
                     }
                     setTempLine(null);
                     return;
@@ -462,8 +654,9 @@
                 return () => window.removeEventListener('pointerup', handlePointerUp);
             });
 
+            // 传递 onUpdateWall 方法到 3D 视图组件中
             if (viewMode === '3d') {
-                return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} onExit={() => setViewMode('2d')} />;
+                return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} onUpdateWall={handleUpdateWall} onExit={() => setViewMode('2d')} />;
             }
 
             return (
@@ -480,6 +673,22 @@
                             >
                                 🚀 3D 巡游
                             </button>
+                        </div>
+
+                        <div className="mb-4 bg-green-50 p-3 rounded-lg border border-green-200">
+                            <h2 className="text-sm font-bold text-green-800 mb-2">💾 存档与加载</h2>
+                            <div className="flex gap-2 mb-2">
+                                <input type="text" placeholder="输入存档名称..." value={saveName} onChange={e=>setSaveName(e.target.value)} className="flex-1 px-2 py-1 text-xs border rounded" />
+                                <button onClick={handleSave} className="bg-green-600 hover:bg-green-700 text-white px-3 py-1 text-xs rounded shadow-sm">保存</button>
+                            </div>
+                            <div className="flex gap-2 items-center">
+                                <select value={selectedSaveId} onChange={e=>setSelectedSaveId(e.target.value)} className="flex-1 px-2 py-1 text-xs border rounded bg-white">
+                                    <option value="">-- 选择已有存档 --</option>
+                                    {savedLayouts.map(s => <option key={s.id} value={s.id}>{s.name} ({new Date(Number(s.id)).toLocaleDateString()})</option>)}
+                                </select>
+                                <button onClick={handleLoad} className="bg-white border border-green-600 text-green-700 hover:bg-green-100 px-3 py-1 text-xs rounded">读取</button>
+                                <button onClick={handleDeleteSave} className="text-red-500 hover:text-red-700 text-xs px-1" title="删除存档">🗑️</button>
+                            </div>
                         </div>
 
                         <div className="mb-4 space-y-3">
@@ -505,7 +714,6 @@
                                     <input type="number" step="0.1" value={rulerLength} onChange={(e) => setRulerLength(Number(e.target.value))} className="w-full px-1 border rounded text-xs border-yellow-300 focus:outline-none focus:border-yellow-500" />
                                 </div>
                                 <input type="range" min="10" max="300" value={ppm} onChange={(e) => setPpm(Number(e.target.value))} className="w-full mt-2" />
-                                <p className="text-[10px] text-gray-500 mt-1 leading-tight">请拖拽右侧红色📍靶心到墙角作为 3D 起点，并用黄色尺子校准像素比例。</p>
                             </div>
                         </div>
 
