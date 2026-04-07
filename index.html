@@ -42,12 +42,12 @@
         // ==========================================
         // 3D 视图组件
         // ==========================================
-        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, wallThickness, onUpdateWall, onUpdateWindowWidth, onUpdateItem, onExit }) => {
+        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, wallThickness, cornerFillers, onUpdateWall, onUpdateWindowWidth, onUpdateItem, onExit }) => {
             const mountRef = useRef(null);
             const minimapRef = useRef(null);
             
             // 核心：统一管理当前选中的 3D 物体 (窗户或家具)
-            const [selectedObj, setSelectedObj] = useState(null); // { id: 123, type: 'window' | 'furniture' }
+            const [selectedObj, setSelectedObj] = useState(null); 
 
             const cameraStateRef = useRef({ x: 0, y: 1.6, z: 0, yaw: 0, pitch: 0 });
 
@@ -106,8 +106,9 @@
                 const selectedGlassMat = new THREE.MeshStandardMaterial({ color: 0xffaa00, transparent: true, opacity: 0.7, roughness: 0.1, emissive: 0x664400 }); 
                 
                 const interactableWindows = []; 
-                const interactableFurniture = []; // 新增：可交互家具的物理碰撞盒集合
+                const interactableFurniture = []; 
 
+                // 核心修复：1:1 绝对真实长度渲染，不再强行加 thickness 延伸墙体！
                 walls.forEach(w => {
                     const x1 = (w.x1 - originPos.x) / ppm;
                     const z1 = (w.y1 - originPos.y) / ppm;
@@ -131,14 +132,14 @@
                     };
 
                     if (w.type === 'solid') {
-                        createBox(thickness, wallHeight, length + thickness, wallHeight / 2, solidWallMat);
+                        createBox(thickness, wallHeight, length, wallHeight / 2, solidWallMat); // 移除 length + thickness
                     } else if (w.type === 'window') {
                         const sillHeight = w.sillHeight !== undefined ? w.sillHeight : 0.9; 
                         const winHeight = w.winHeight !== undefined ? w.winHeight : 1.4;  
-                        createBox(thickness, sillHeight, length + thickness, sillHeight / 2, solidWallMat);
+                        createBox(thickness, sillHeight, length, sillHeight / 2, solidWallMat); // 移除 length + thickness
                         const headerHeight = wallHeight - sillHeight - winHeight;
                         if (headerHeight > 0) {
-                            createBox(thickness, headerHeight, length + thickness, wallHeight - headerHeight / 2, solidWallMat);
+                            createBox(thickness, headerHeight, length, wallHeight - headerHeight / 2, solidWallMat); // 移除 length + thickness
                         }
                         const isSelected = selectedObj?.type === 'window' && selectedObj.id === w.id;
                         const glassMesh = createBox(thickness * 0.2, winHeight, length, sillHeight + winHeight / 2, isSelected ? selectedGlassMat : glassMat);
@@ -147,13 +148,23 @@
                     }
                 });
 
-                // --- 核心功能：全新参数化真实家具模型库 ---
+                // --- 智能拐角填补 (仅在真正的非共线转角处生成方形柱体) ---
+                cornerFillers.forEach(pt => {
+                    const cx = (pt.x - originPos.x) / ppm;
+                    const cz = (pt.y - originPos.y) / ppm;
+                    const geo = new THREE.BoxGeometry(thickness, wallHeight, thickness);
+                    const mesh = new THREE.Mesh(geo, solidWallMat);
+                    mesh.position.set(cx, wallHeight / 2, cz);
+                    mesh.castShadow = true;
+                    mesh.receiveShadow = true;
+                    scene.add(mesh);
+                });
+
                 const createProceduralFurniture = (item, isSelected) => {
                     const group = new THREE.Group();
-                    group.userData = { id: item.id, type: 'furniture' }; // 绑定数据供射线检测
+                    group.userData = { id: item.id, type: 'furniture' }; 
 
                     const baseColor = item.color || '#cccccc';
-                    // 选中状态产生发光效果 (Emissive)
                     const mat = new THREE.MeshStandardMaterial({ 
                         color: baseColor, 
                         roughness: 0.8,
@@ -173,55 +184,54 @@
 
                     switch (item.type) {
                         case 'table':
-                            addPart(w, 0.05, h, 0, d - 0.025, 0); // 桌面
-                            addPart(0.05, d - 0.05, 0.05, -w/2+0.05, (d-0.05)/2, -h/2+0.05); // 四条腿
+                            addPart(w, 0.05, h, 0, d - 0.025, 0); 
+                            addPart(0.05, d - 0.05, 0.05, -w/2+0.05, (d-0.05)/2, -h/2+0.05); 
                             addPart(0.05, d - 0.05, 0.05, w/2-0.05, (d-0.05)/2, -h/2+0.05);
                             addPart(0.05, d - 0.05, 0.05, -w/2+0.05, (d-0.05)/2, h/2-0.05);
                             addPart(0.05, d - 0.05, 0.05, w/2-0.05, (d-0.05)/2, h/2-0.05);
                             break;
                         case 'chair':
                             const seatH = d * 0.45;
-                            addPart(w, 0.05, h, 0, seatH, 0); // 坐垫
-                            addPart(0.04, seatH, 0.04, -w/2+0.04, seatH/2, -h/2+0.04); // 腿
+                            addPart(w, 0.05, h, 0, seatH, 0); 
+                            addPart(0.04, seatH, 0.04, -w/2+0.04, seatH/2, -h/2+0.04); 
                             addPart(0.04, seatH, 0.04, w/2-0.04, seatH/2, -h/2+0.04);
                             addPart(0.04, seatH, 0.04, -w/2+0.04, seatH/2, h/2-0.04);
                             addPart(0.04, seatH, 0.04, w/2-0.04, seatH/2, h/2-0.04);
-                            addPart(w, d - seatH, 0.04, 0, seatH + (d - seatH)/2, -h/2+0.02); // 靠背
+                            addPart(w, d - seatH, 0.04, 0, seatH + (d - seatH)/2, -h/2+0.02); 
                             break;
                         case 'bed':
-                            addPart(w, 0.2, h, 0, 0.1, 0); // 床架
+                            addPart(w, 0.2, h, 0, 0.1, 0); 
                             const mattressMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, emissive: isSelected ? 0x222222 : 0 });
-                            addPart(w-0.1, 0.15, h-0.1, 0, 0.2 + 0.075, 0, mattressMat); // 床垫
-                            addPart(w, d, 0.1, 0, d/2, -h/2+0.05); // 床头板
+                            addPart(w-0.1, 0.15, h-0.1, 0, 0.2 + 0.075, 0, mattressMat); 
+                            addPart(w, d, 0.1, 0, d/2, -h/2+0.05); 
                             break;
                         case 'rack':
-                            addPart(0.04, d, 0.04, -w/2+0.02, d/2, -h/2+0.02); // 四根立柱
+                            addPart(0.04, d, 0.04, -w/2+0.02, d/2, -h/2+0.02); 
                             addPart(0.04, d, 0.04, w/2-0.02, d/2, -h/2+0.02);
                             addPart(0.04, d, 0.04, -w/2+0.02, d/2, h/2-0.02);
                             addPart(0.04, d, 0.04, w/2-0.02, d/2, h/2-0.02);
                             const shelves = Math.max(2, Math.floor(d / 0.4)); 
                             for(let i=0; i<shelves; i++) {
-                                addPart(w, 0.02, h, 0, (d/(shelves-1))*i || 0.05, 0); // 层板
+                                addPart(w, 0.02, h, 0, (d/(shelves-1))*i || 0.05, 0); 
                             }
                             break;
-                        case 'toilet': // 真实马桶构造
-                            addPart(w * 0.6, d * 0.45, h * 0.6, 0, d * 0.45 / 2, h * 0.2); // 底座
-                            addPart(w * 0.8, d * 0.55, h * 0.4, 0, d * 0.45 + d * 0.55 / 2, -h * 0.3); // 水箱
-                            addPart(w * 0.6, 0.05, h * 0.6, 0, d * 0.45 + 0.025, h * 0.2); // 盖板
+                        case 'toilet': 
+                            addPart(w * 0.6, d * 0.45, h * 0.6, 0, d * 0.45 / 2, h * 0.2); 
+                            addPart(w * 0.8, d * 0.55, h * 0.4, 0, d * 0.45 + d * 0.55 / 2, -h * 0.3); 
+                            addPart(w * 0.6, 0.05, h * 0.6, 0, d * 0.45 + 0.025, h * 0.2); 
                             break;
-                        case 'basin': // 洗手盆带半身镜
-                            addPart(w, d * 0.85, h, 0, d * 0.85 / 2, 0); // 底部地柜
+                        case 'basin': 
+                            addPart(w, d * 0.85, h, 0, d * 0.85 / 2, 0); 
                             const topMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.1, emissive: isSelected ? 0x444444 : 0 });
-                            addPart(w * 1.05, 0.05, h * 1.05, 0, d * 0.85 + 0.025, 0, topMat); // 洗手台面
-                            // 将之前的黑色高反光镜面，改为淡蓝色玻璃质感
+                            addPart(w * 1.05, 0.05, h * 1.05, 0, d * 0.85 + 0.025, 0, topMat); 
                             const mirrorMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, roughness: 0.1, metalness: 0.3, transparent: true, opacity: 0.8 });
-                            addPart(w * 0.9, d * 0.6, 0.02, 0, d * 0.85 + 0.05 + d * 0.3, -h / 2 + 0.01, mirrorMat); // 墙上镜子
+                            addPart(w * 0.9, d * 0.6, 0.02, 0, d * 0.85 + 0.05 + d * 0.3, -h / 2 + 0.01, mirrorMat); 
                             break;
                         case 'cabinet':
-                        case 'wardrobe': // 橱柜与大衣柜
-                            addPart(w, d, h, 0, d / 2, 0); // 柜体主块
+                        case 'wardrobe': 
+                            addPart(w, d, h, 0, d / 2, 0); 
                             const counterMat = new THREE.MeshStandardMaterial({ color: 0xf3f4f6, roughness: 0.4, emissive: isSelected ? 0x333333 : 0 });
-                            addPart(w * 1.02, 0.05, h * 1.02, 0, d + 0.025, 0, counterMat); // 稍微溢出的台面或顶板
+                            addPart(w * 1.02, 0.05, h * 1.02, 0, d + 0.025, 0, counterMat); 
                             break;
                         case 'light':
                             const lightGeo = new THREE.CylinderGeometry(w/2, w/2, 0.05, 16);
@@ -230,13 +240,12 @@
                             group.add(lightMesh);
                             break;
                         default:
-                            addPart(w, d, h, 0, d/2, 0); // 基础方块
+                            addPart(w, d, h, 0, d/2, 0); 
                             break;
                     }
                     return group;
                 };
 
-                // 遍历放置家具
                 items.forEach(item => {
                     const x3d = (item.x - originPos.x) / ppm + item.w / 2;
                     const z3d = (item.y - originPos.y) / ppm + item.h / 2;
@@ -250,9 +259,8 @@
                     furnitureGroup.position.set(x3d, yElev, z3d); 
                     furnitureGroup.rotation.y = -item.r * Math.PI / 180; 
                     scene.add(furnitureGroup);
-                    interactableFurniture.push(furnitureGroup); // 加入检测列表
+                    interactableFurniture.push(furnitureGroup); 
 
-                    // 如果是灯，额外生成真实点光源
                     if (item.type === 'light') {
                         const pLight = new THREE.PointLight(0xfffae6, 0.6, 12);
                         pLight.position.set(x3d, yElev - 0.2, z3d);
@@ -261,7 +269,6 @@
                     }
                 });
 
-                // 控制与交互逻辑
                 const moveState = { forward: false, backward: false, left: false, right: false };
                 let isDragging = false, prevMouse = { x: 0, y: 0 };
                 let yaw = cameraStateRef.current.yaw;
@@ -280,7 +287,6 @@
                     prevMouse = { x: clickStartX, y: clickStartY }; 
                 };
                 
-                // --- 射线拾取：检测点中的是窗户还是家具 ---
                 const onUp = (e) => { 
                     isDragging = false; 
                     const currentX = e.clientX || (e.changedTouches ? e.changedTouches[0].clientX : clickStartX);
@@ -304,7 +310,7 @@
 
                         if (intersectsFurniture.length > 0 && intersectsFurniture[0].distance < minDist) {
                             let obj = intersectsFurniture[0].object;
-                            while(obj && !obj.userData?.id) obj = obj.parent; // 向上查找包裹了 id 的 Group
+                            while(obj && !obj.userData?.id) obj = obj.parent; 
                             if (obj && obj.userData?.id) {
                                 closest = { id: obj.userData.id, type: 'furniture' };
                             }
@@ -416,9 +422,8 @@
                     window.removeEventListener('resize', onResize);
                     if (container) container.innerHTML = '';
                 };
-            }, [items, ppm, originPos, walls, wallHeight, wallThickness, selectedObj]);
+            }, [items, ppm, originPos, walls, wallHeight, wallThickness, cornerFillers, selectedObj]);
 
-            // 根据选中的 ID 映射出对应的数据对象
             const activeWin = selectedObj?.type === 'window' ? walls.find(w => w.id === selectedObj.id) : null;
             const activeFurn = selectedObj?.type === 'furniture' ? items.find(i => i.id === selectedObj.id) : null;
 
@@ -443,7 +448,6 @@
                         </div>
                     </div>
 
-                    {/* --- 面板 1：窗户调节面板 --- */}
                     {activeWin && (
                         <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-[90%] max-w-2xl pointer-events-auto transition-all">
                             <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
@@ -467,7 +471,6 @@
                         </div>
                     )}
 
-                    {/* --- 面板 2：家具调节面板 --- */}
                     {activeFurn && (
                         <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-purple-200 z-30 w-[90%] max-w-2xl pointer-events-auto transition-all">
                             <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
@@ -782,7 +785,36 @@
 
             useEffect(() => { window.addEventListener('pointerup', handlePointerUp); return () => window.removeEventListener('pointerup', handlePointerUp); });
 
-            if (viewMode === '3d') return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} wallThickness={wallThickness} onUpdateWall={handleUpdateWall} onUpdateWindowWidth={handleUpdateWindowWidth} onUpdateItem={handleUpdateItem} onExit={() => setViewMode('2d')} />;
+            // --- 核心算法：计算真正的墙体几何交角 (Smart Corner Matrix) ---
+            const cornerFillers = [];
+            const seenCorners = new Set();
+            walls.forEach(w1 => {
+                [ {x: w1.x1, y: w1.y1, px: w1.x2, py: w1.y2}, {x: w1.x2, y: w1.y2, px: w1.x1, py: w1.y1} ].forEach(p1 => {
+                    const key = `${Math.round(p1.x)},${Math.round(p1.y)}`;
+                    if (seenCorners.has(key)) return;
+
+                    let isCorner = false;
+                    walls.forEach(w2 => {
+                        if (w1.id === w2.id) return;
+                        [ {x: w2.x1, y: w2.y1, px: w2.x2, py: w2.y2}, {x: w2.x2, y: w2.y2, px: w2.x1, py: w2.y1} ].forEach(p2 => {
+                            if (Math.hypot(p1.x - p2.x, p1.y - p2.y) < 5) {
+                                const len1 = Math.hypot(p1.px - p1.x, p1.py - p1.y);
+                                const len2 = Math.hypot(p2.px - p2.x, p2.py - p2.y);
+                                if (len1 > 0 && len2 > 0) {
+                                    const dot = ((p1.px - p1.x)/len1) * ((p2.px - p2.x)/len2) + ((p1.py - p1.y)/len1) * ((p2.py - p2.y)/len2);
+                                    if (Math.abs(dot) < 0.99) isCorner = true; // 夹角不是 0 或 180 度 (非共线)
+                                }
+                            }
+                        });
+                    });
+                    if (isCorner) {
+                        cornerFillers.push({ x: p1.x, y: p1.y });
+                        seenCorners.add(key);
+                    }
+                });
+            });
+
+            if (viewMode === '3d') return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} wallThickness={wallThickness} cornerFillers={cornerFillers} onUpdateWall={handleUpdateWall} onUpdateWindowWidth={handleUpdateWindowWidth} onUpdateItem={handleUpdateItem} onExit={() => setViewMode('2d')} />;
 
             return (
                 <div className="flex flex-col md:flex-row h-screen w-screen overflow-hidden font-sans text-gray-800">
@@ -837,233 +869,4 @@
                         <div className="mb-4 bg-blue-50 p-3 rounded-lg border border-blue-200">
                             <div className="flex justify-between items-center mb-2"><h2 className="text-sm font-bold text-blue-800">3. 墙体放样</h2></div>
                             <div className="flex gap-2 mb-3 text-xs">
-                                <div className="flex items-center gap-1 flex-1"><label className="text-blue-700 font-medium">层高(m):</label><input type="number" step="0.1" value={wallHeight} onChange={(e)=>setWallHeight(Number(e.target.value))} className="w-full px-1 border rounded" /></div>
-                                <div className="flex items-center gap-1 flex-1"><label className="text-blue-700 font-medium">墙厚(m):</label><input type="number" step="0.05" min="0.05" max="0.5" value={wallThickness} onChange={(e)=>setWallThickness(Number(e.target.value))} className="w-full px-1 border rounded" /></div>
-                            </div>
-                            
-                            <div className="flex gap-1 mb-2">
-                                <button onClick={() => setDrawMode('none')} className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'none' ? 'bg-amber-100 text-amber-800 border-amber-300 shadow-inner' : 'bg-white text-gray-500 hover:bg-gray-100'}`}>👆 选择/编辑</button>
-                                <button onClick={() => setDrawMode('solid')} className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'solid' ? 'bg-gray-800 text-white border-gray-800 shadow-inner' : 'bg-white text-gray-700 hover:bg-gray-100'}`}>{drawMode === 'solid' ? '🔴 画墙中' : '✏️ 画墙壁'}</button>
-                                <button onClick={() => setDrawMode('window')} className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'window' ? 'bg-blue-500 text-white border-blue-500 shadow-inner' : 'bg-white text-blue-600 hover:bg-blue-50'}`}>{drawMode === 'window' ? '🔴 画窗中' : '🪟 画窗户'}</button>
-                            </div>
-                            {walls.length > 0 && <div className="flex justify-between items-center mt-2 border-t border-blue-200 pt-2"><span className="text-xs text-blue-700">已画线段: {walls.length} 条</span>{drawMode === 'none' && <span className="text-xs text-amber-600 font-bold animate-pulse">可点选图纸删除墙</span>}</div>}
-                        </div>
-
-                        {/* --- 核心优化：将家具面板折叠 --- */}
-                        <div className="mb-4">
-                            <button 
-                                onClick={() => setIsFurnitureExpanded(!isFurnitureExpanded)} 
-                                className="w-full flex justify-between items-center bg-gray-100 hover:bg-gray-200 border border-gray-200 p-2 rounded-lg transition-colors cursor-pointer"
-                            >
-                                <h2 className="text-sm font-bold text-gray-700">4. 放置参数化家具 🛋️</h2>
-                                <span className="text-gray-500 text-xs">{isFurnitureExpanded ? '▼ 收起' : '▶ 展开'}</span>
-                            </button>
-                            
-                            {isFurnitureExpanded && (
-                                <div className="mt-3">
-                                    <div className="grid grid-cols-3 gap-2">
-                                        {[
-                                            {n:'桌子',w:1.6,h:0.6,d:0.75,e:0,c:'#d97706', t:'table'}, 
-                                            {n:'椅子',w:0.45,h:0.45,d:0.9,e:0,c:'#4b5563', t:'chair'}, 
-                                            {n:'双人床',w:1.8,h:2.0,d:1.0,e:0,c:'#be185d', t:'bed'}, 
-                                            {n:'大衣柜',w:2.0,h:0.6,d:2.4,e:0,c:'#854d0e', t:'wardrobe'}, 
-                                            {n:'陈列架',w:0.8,h:0.3,d:1.8,e:0,c:'#374151', t:'rack'}, 
-                                            {n:'马桶',w:0.4,h:0.7,d:0.8,e:0,c:'#f8fafc', t:'toilet'},
-                                            {n:'洗手盆',w:0.8,h:0.5,d:0.85,e:0,c:'#e2e8f0', t:'basin'},
-                                            {n:'厨房地柜',w:1.2,h:0.6,d:0.8,e:0,c:'#94a3b8', t:'cabinet'},
-                                            {n:'厨房吊柜',w:1.0,h:0.35,d:0.8,e:1.6,c:'#e0e7ff', t:'cabinet'}, 
-                                            {n:'💡 吸顶灯',w:0.6,h:0.6,d:0.05,e:undefined,c:'#fef08a', t:'light'}
-                                        ].map((o,i) => (
-                                            <button key={i} onClick={() => {
-                                                setDrawMode('none'); 
-                                                const nx = containerRef.current ? (containerRef.current.scrollLeft+150)/zoom : 100;
-                                                const ny = containerRef.current ? (containerRef.current.scrollTop+150)/zoom : 100;
-                                                setItems([...items, {id:Date.now(), name:o.n, w:o.w, h:o.h, d:o.d, elevation:o.e, x:nx, y:ny, r:0, color:o.c, type: o.t}]);
-                                            }} className="bg-gray-50 border border-gray-200 hover:bg-gray-100 text-[11px] py-2 rounded shadow-sm font-bold truncate px-1">
-                                                + {o.n}
-                                            </button>
-                                        ))}
-                                    </div>
-                                    
-                                    <div className="bg-purple-50 p-3 rounded-lg border border-purple-200 mt-3 shadow-sm">
-                                        <p className="text-sm font-medium mb-2 text-purple-800">✏️ 自定义添加</p>
-                                        <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
-                                            <div><label className="block text-gray-600 mb-1">名称</label><input type="text" value={customConfig.name} onChange={e => setCustomConfig({...customConfig, name: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                            <div><label className="block text-gray-600 mb-1">类别</label>
-                                                <select value={customConfig.type} onChange={e => setCustomConfig({...customConfig, type: e.target.value})} className="w-full border rounded px-1 py-1 bg-white">
-                                                    <option value="box">基础方块</option><option value="table">桌子</option><option value="chair">椅子</option><option value="bed">床铺</option><option value="wardrobe">衣柜</option><option value="rack">层架</option><option value="cabinet">地/吊柜</option><option value="toilet">马桶</option><option value="basin">洗手盆</option>
-                                                </select>
-                                            </div>
-                                            <div><label className="block text-gray-600 mb-1">宽(X) m</label><input type="number" step="0.1" value={customConfig.w} onChange={e => setCustomConfig({...customConfig, w: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                            <div><label className="block text-gray-600 mb-1">深(Y) m</label><input type="number" step="0.1" value={customConfig.h} onChange={e => setCustomConfig({...customConfig, h: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                            <div><label className="block text-gray-600 mb-1">高(Z) m</label><input type="number" step="0.1" value={customConfig.d} onChange={e => setCustomConfig({...customConfig, d: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                            <div><label className="block text-gray-600 mb-1">离地高度 m</label><input type="number" step="0.1" value={customConfig.elevation} onChange={e => setCustomConfig({...customConfig, elevation: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                            <div className="col-span-2"><label className="block text-gray-600 mb-1">颜色</label><input type="color" value={customConfig.color} onChange={e => setCustomConfig({...customConfig, color: e.target.value})} className="w-full h-6 border rounded cursor-pointer bg-white" /></div>
-                                        </div>
-                                        <button onClick={addCustomItem} className="w-full bg-purple-600 hover:bg-purple-700 text-white py-1.5 rounded text-sm transition shadow-sm cursor-pointer">➕ 添加</button>
-                                    </div>
-                                </div>
-                            )}
-                        </div>
-
-                        {(selectedId && selectedId !== 'ruler' && selectedId !== 'origin' && drawMode === 'none') && (() => {
-                            const selItem = items.find(i=>i.id===selectedId);
-                            if(!selItem) return null;
-                            return (
-                            <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mt-auto shadow-sm">
-                                <div className="flex justify-between items-center mb-2">
-                                    <p className="text-xs font-bold text-gray-800">编辑选中物品</p>
-                                    <input type="color" value={selItem.color || '#000000'} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, color: e.target.value}:i))} className="w-5 h-5 p-0 border-0 rounded cursor-pointer" title="修改颜色" />
-                                </div>
-                                
-                                <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
-                                    <div><label className="text-gray-500">宽(X)m:</label><input type="number" step="0.1" value={selItem.w} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, w:Number(e.target.value)}:i))} className="w-full border rounded px-1" /></div>
-                                    <div><label className="text-gray-500">深(Y)m:</label><input type="number" step="0.1" value={selItem.h} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, h:Number(e.target.value)}:i))} className="w-full border rounded px-1" /></div>
-                                    <div><label className="text-gray-500">自身高度m:</label><input type="number" step="0.1" value={selItem.d || 0.75} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, d:Number(e.target.value)}:i))} className="w-full border rounded px-1" /></div>
-                                    <div><label className="text-gray-500">离地高度m:</label><input type="number" step="0.1" value={selItem.elevation || 0} onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, elevation:Number(e.target.value)}:i))} className="w-full border rounded px-1" /></div>
-                                </div>
-
-                                <div className="flex gap-2 mb-2">
-                                    <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r-90)%360}:i))} className="flex-1 bg-white border hover:bg-gray-100 py-1 rounded text-xs transition">↺ 转 90°</button>
-                                    <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r+90)%360}:i))} className="flex-1 bg-white border hover:bg-gray-100 py-1 rounded text-xs transition">↻ 转 90°</button>
-                                </div>
-                                <button onClick={() => {setItems(items.filter(i=>i.id!==selectedId)); setSelectedId(null);}} className="w-full bg-red-100 text-red-600 hover:bg-red-200 py-1.5 rounded text-xs font-bold transition">🗑️ 删除该物品</button>
-                            </div>
-                        )})()}
-                        
-                        {(selectedWallId && drawMode === 'none') && (
-                            <div className="bg-red-50 p-3 rounded-lg border border-red-200 mt-auto">
-                                <p className="text-xs font-bold text-red-800 mb-2">编辑选中墙体 / 窗户</p>
-                                <button onClick={() => {setWalls(walls.filter(w=>w.id !== selectedWallId)); setSelectedWallId(null);}} className="w-full bg-red-600 text-white hover:bg-red-700 py-2 rounded text-xs font-bold transition shadow-sm">
-                                    🗑️ 删除选中线段
-                                </button>
-                            </div>
-                        )}
-                    </div>
-
-                    <div 
-                        className={`flex-1 relative overflow-auto grid-bg-dynamic ${drawMode !== 'none' ? 'cursor-crosshair' : 'cursor-default'} no-scrollbar touch-none`}
-                        ref={containerRef}
-                        onPointerMove={handlePointerMove}
-                        onPointerDown={(e) => handlePointerDown(e, null, 0, 0)} 
-                        style={{ backgroundSize: `${20 * zoom}px ${20 * zoom}px` }} 
-                    >
-                        <div className="fixed md:absolute bottom-6 right-6 flex items-center bg-white shadow-xl rounded-lg border z-50 text-sm">
-                            <button onClick={() => setZoom(z => Math.max(0.1, Number((z - 0.1).toFixed(2))))} className="px-3 py-2 border-r">➖</button>
-                            <span className="px-4 py-2 min-w-[4rem] text-center">{Math.round(zoom * 100)}%</span>
-                            <button onClick={() => setZoom(z => Math.min(5, Number((z + 0.1).toFixed(2))))} className="px-3 py-2 border-l">➕</button>
-                        </div>
-
-                        {!bgImage && <div className="absolute inset-0 flex items-center justify-center text-gray-400 font-medium z-0">请在左侧上传或直接 Ctrl+V 粘贴平面图</div>}
-
-                        {bgImage && (
-                            <img src={bgImage} className="absolute top-0 left-0 pointer-events-none origin-top-left shadow-lg"
-                                style={{ width: imgSize.w ? `${imgSize.w * zoom}px` : 'auto', height: imgSize.h ? `${imgSize.h * zoom}px` : 'auto', zIndex: 0 }}
-                            />
-                        )}
-
-                        <svg className="absolute top-0 left-0 pointer-events-none" style={{ width: '10000px', height: '10000px', zIndex: 5 }}>
-                            {guides.map((g, i) => {
-                                if (g.type === 'v') return <line key={`gv-${i}`} x1={g.pos * zoom} y1={-10000} x2={g.pos * zoom} y2={10000} stroke="#ec4899" strokeWidth="1" strokeDasharray="5 5" opacity="0.6" />;
-                                if (g.type === 'h') return <line key={`gh-${i}`} x1={-10000} y1={g.pos * zoom} x2={10000} y2={g.pos * zoom} stroke="#ec4899" strokeWidth="1" strokeDasharray="5 5" opacity="0.6" />;
-                                return null;
-                            })}
-                            
-                            {walls.map(w => (
-                                <g key={w.id}>
-                                    <line 
-                                        x1={w.x1 * zoom} y1={w.y1 * zoom} 
-                                        x2={w.x2 * zoom} y2={w.y2 * zoom}
-                                        stroke="transparent"
-                                        strokeWidth={Math.max(wallThickness * ppm * zoom, 24)} 
-                                        className={drawMode === 'none' ? "cursor-pointer pointer-events-auto" : "pointer-events-none"}
-                                        style={{ pointerEvents: drawMode === 'none' ? 'stroke' : 'none' }}
-                                        onPointerDown={(e) => handlePointerDown(e, `wall_${w.id}`, 0, 0)}
-                                    />
-                                    <line 
-                                        x1={w.x1 * zoom} y1={w.y1 * zoom} 
-                                        x2={w.x2 * zoom} y2={w.y2 * zoom}
-                                        stroke={selectedWallId === w.id ? '#ef4444' : (w.type === 'window' ? '#3b82f6' : '#1f2937')} 
-                                        strokeWidth={wallThickness * ppm * zoom} 
-                                        strokeLinecap="square" 
-                                        opacity={w.type === 'window' ? 0.7 : 0.9}
-                                        className="pointer-events-none transition-colors"
-                                    />
-                                </g>
-                            ))}
-                            {tempLine && (
-                                <line 
-                                    x1={tempLine.x1 * zoom} y1={tempLine.y1 * zoom} 
-                                    x2={tempLine.x2 * zoom} y2={tempLine.y2 * zoom}
-                                    stroke={drawMode === 'window' ? '#3b82f6' : '#1f2937'} 
-                                    strokeWidth={wallThickness * ppm * zoom} 
-                                    strokeDasharray="8 8"
-                                    strokeLinecap="square" 
-                                />
-                            )}
-                            
-                            {snapPoint && drawMode !== 'none' && (
-                                <circle 
-                                    cx={snapPoint.x * zoom} cy={snapPoint.y * zoom} 
-                                    r={8} fill="#10b981" stroke="#ffffff" strokeWidth="2"
-                                />
-                            )}
-                        </svg>
-
-                        <div 
-                            className="absolute flex flex-col items-center justify-center z-50 cursor-move drop-shadow-xl"
-                            style={{ left: `${originPos.x * zoom}px`, top: `${originPos.y * zoom}px`, transform: 'translate(-50%, -50%)', touchAction: 'none' }}
-                            onPointerDown={(e) => handlePointerDown(e, 'origin', originPos.x, originPos.y)}
-                        >
-                            <div className={`w-8 h-8 rounded-full border-4 border-red-600 bg-red-500/50 flex items-center justify-center animate-bounce ${selectedId==='origin'?'ring-4 ring-red-300':''}`}>
-                                <div className="w-2 h-2 bg-white rounded-full"></div>
-                            </div>
-                            <span className="mt-1 bg-red-600 text-white text-[10px] px-2 py-0.5 rounded-full whitespace-nowrap pointer-events-none font-bold">
-                                📍 起点锚点
-                            </span>
-                        </div>
-
-                        {showRuler && (
-                            <div className={`absolute bg-yellow-400/80 border-2 border-yellow-600 shadow-md z-40 cursor-move ${selectedId==='ruler'?'ring-2 ring-yellow-400':''}`}
-                                style={{ width: `${rulerLength * ppm * zoom}px`, height: '8px', left: `${rulerState.x * zoom}px`, top: `${rulerState.y * zoom}px`, transform: `rotate(${rulerState.r}deg)`, borderRadius: '4px', touchAction: 'none' }}
-                                onPointerDown={(e) => handlePointerDown(e, 'ruler', rulerState.x, rulerState.y)}
-                            >
-                                <span className="absolute whitespace-nowrap bg-white text-yellow-700 px-1 rounded shadow text-[10px] pointer-events-none" style={{ top: '-20px', transform: `rotate(${-rulerState.r}deg)` }}>
-                                    尺子：{rulerLength}m
-                                </span>
-                            </div>
-                        )}
-
-                        {items.map(item => (
-                            <div key={item.id} className="absolute flex flex-col items-center justify-center cursor-move select-none transition-shadow"
-                                style={{
-                                    width: `${item.w * ppm * zoom}px`, height: `${item.h * ppm * zoom}px`,
-                                    left: `${item.x * zoom}px`, top: `${item.y * zoom}px`, transform: `rotate(${item.r}deg)`,
-                                    backgroundColor: `${item.color}ee`, 
-                                    border: item.id === selectedId ? '3px solid #000' : '2px solid rgba(0,0,0,0.5)',
-                                    boxShadow: item.id === selectedId ? '0 10px 20px -5px rgba(0,0,0,0.5)' : '0 4px 6px -1px rgba(0,0,0,0.3)',
-                                    zIndex: item.id === selectedId ? 30 : 10, 
-                                    borderRadius: item.type === 'light' ? '50%' : '4px', 
-                                    touchAction: 'none'
-                                }}
-                                onPointerDown={(e) => handlePointerDown(e, item.id, item.x, item.y)}
-                            >
-                                <div className="flex flex-col items-center justify-center w-full h-full pointer-events-none" style={{ transform: `scale(${Math.min(zoom, 1)})` }}>
-                                    <span className="text-gray-900 font-bold drop-shadow-md text-sm text-center leading-tight mix-blend-difference text-white">
-                                        {item.name}<br/>
-                                        <span className="text-[10px] opacity-80">{item.w}x{item.h}x{item.d || 0.75}m</span><br/>
-                                        {item.elevation > 0 && <span className="text-[10px] text-yellow-300">↑离地 {item.elevation}m</span>}
-                                    </span>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                </div>
-            );
-        }
-
-        const root = ReactDOM.createRoot(document.getElementById('root'));
-        root.render(<App />);
-    </script>
-</body>
-</html>
+                                <div className="flex items-center gap-1 flex-1"><label className="text-blue-700 font-medium">层高(m):</label><input type="number" step="0.1" value={wallHeight} onChange={(e)=>setWallHeight(Number(
