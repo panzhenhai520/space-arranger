@@ -67,16 +67,20 @@
                 renderer.shadowMap.type = THREE.PCFSoftShadowMap;
                 container.appendChild(renderer.domElement);
 
-                scene.add(new THREE.AmbientLight(0xffffff, 0.5));
-                const dirLight = new THREE.DirectionalLight(0xffffff, 0.4);
+                // --- 优化的全局补光系统 ---
+                // 1. 基础环境光，稍微提亮
+                scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+                
+                // 2. 半球光：模拟天空发出的光和地面的反光，确保没有房间会“死黑”
+                const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.4);
+                hemiLight.position.set(0, 20, 0);
+                scene.add(hemiLight);
+
+                // 3. 主平行光（模拟阳光）
+                const dirLight = new THREE.DirectionalLight(0xffffff, 0.3);
                 dirLight.position.set(5, 10, 5);
                 dirLight.castShadow = true;
                 scene.add(dirLight);
-                
-                const pointLight = new THREE.PointLight(0xfffae6, 0.6, 15);
-                pointLight.position.set(0, 2.5, 0);
-                pointLight.castShadow = true;
-                scene.add(pointLight);
 
                 const floorGeo = new THREE.PlaneGeometry(50, 50);
                 const floorMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.8 });
@@ -96,7 +100,6 @@
                 const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, transparent: true, opacity: 0.4, roughness: 0.1 });
                 
                 walls.forEach(w => {
-                    // 将 2D 像素坐标映射为 3D 空间坐标
                     const x1 = (w.x1 - originPos.x) / ppm;
                     const z1 = (w.y1 - originPos.y) / ppm;
                     const x2 = (w.x2 - originPos.x) / ppm;
@@ -118,41 +121,49 @@
                     };
 
                     if (w.type === 'solid') {
-                        // 实体墙
                         createBox(thickness, wallHeight, length + thickness * 0.5, wallHeight / 2, solidWallMat);
                     } else if (w.type === 'window') {
-                        // 窗户处理
-                        const sillHeight = 0.9; // 离地窗台高 0.9m
-                        const winHeight = 1.4;  // 窗户玻璃高 1.4m
-                        
-                        // 1. 下方窗台墙
+                        const sillHeight = 0.9; 
+                        const winHeight = 1.4;  
                         createBox(thickness, sillHeight, length + thickness * 0.5, sillHeight / 2, solidWallMat);
-                        
-                        // 2. 上方横梁墙
                         const headerHeight = wallHeight - sillHeight - winHeight;
                         if (headerHeight > 0) {
                             createBox(thickness, headerHeight, length + thickness * 0.5, wallHeight - headerHeight / 2, solidWallMat);
                         }
-                        
-                        // 3. 中间玻璃
                         createBox(thickness * 0.2, winHeight, length, sillHeight + winHeight / 2, glassMat);
                     }
                 });
 
-                // 将 2D 家具映射到 3D 空间
+                // --- 将 2D 家具与光源映射到 3D 空间 ---
                 items.forEach(item => {
                     const x3d = (item.x - originPos.x) / ppm + item.w / 2;
                     const z3d = (item.y - originPos.y) / ppm + item.h / 2;
 
-                    const itemGeo = new THREE.BoxGeometry(item.w, 0.75, item.h); 
-                    const itemMat = new THREE.MeshStandardMaterial({ color: item.color });
-                    const mesh = new THREE.Mesh(itemGeo, itemMat);
-                    
-                    mesh.position.set(x3d, 0.75 / 2, z3d);
-                    mesh.rotation.y = -item.r * Math.PI / 180;
-                    mesh.castShadow = true;
-                    mesh.receiveShadow = true;
-                    scene.add(mesh);
+                    if (item.type === 'light') {
+                        // 如果是吸顶灯，在天花板位置创建一个发光圆盘和一个点光源
+                        const lightGeo = new THREE.CylinderGeometry(0.15, 0.15, 0.05, 16);
+                        const lightMat = new THREE.MeshBasicMaterial({ color: 0xfffae6 }); // 发光材质（不受阴影影响）
+                        const lightMesh = new THREE.Mesh(lightGeo, lightMat);
+                        lightMesh.position.set(x3d, wallHeight - 0.025, z3d); // 贴近天花板
+                        scene.add(lightMesh);
+
+                        // 真实的点光源，照亮下方的房间
+                        const pLight = new THREE.PointLight(0xfffae6, 0.6, 12); // 柔和的暖白光，照亮半径12米
+                        pLight.position.set(x3d, wallHeight - 0.2, z3d);
+                        pLight.castShadow = true;
+                        scene.add(pLight);
+                    } else {
+                        // 如果是普通家具
+                        const itemGeo = new THREE.BoxGeometry(item.w, 0.75, item.h); 
+                        const itemMat = new THREE.MeshStandardMaterial({ color: item.color });
+                        const mesh = new THREE.Mesh(itemGeo, itemMat);
+                        
+                        mesh.position.set(x3d, 0.75 / 2, z3d);
+                        mesh.rotation.y = -item.r * Math.PI / 180;
+                        mesh.castShadow = true;
+                        mesh.receiveShadow = true;
+                        scene.add(mesh);
+                    }
                 });
 
                 // 控制逻辑
@@ -195,7 +206,6 @@
                     ctx.translate(canvas.width / 2, canvas.height / 2);
                     const scale = 15; 
                     ctx.scale(scale, scale);
-                    // 尝试让地图居中，简单抵消相机当前位置的一部分
                     ctx.translate(-camera.position.x * 0.5, -camera.position.z * 0.5);
 
                     // 画墙壁
@@ -300,26 +310,25 @@
             const [ppm, setPpm] = useState(120); 
             const [originPos, setOriginPos] = useState({ x: 250, y: 250 });
 
-            // 墙体放样相关状态
             const [wallHeight, setWallHeight] = useState(2.6);
-            const [walls, setWalls] = useState([]); // {id, x1, y1, x2, y2, type: 'solid'|'window'}
-            const [drawMode, setDrawMode] = useState('none'); // 'none', 'solid', 'window'
+            const [walls, setWalls] = useState([]); 
+            const [drawMode, setDrawMode] = useState('none'); 
             const [tempLine, setTempLine] = useState(null);
 
-            // 自定义家具配置状态
             const [customConfig, setCustomConfig] = useState({ name: '自定义物品', w: 1.0, h: 1.0, color: '#8b5cf6' });
 
+            // 预置了一个桌子和一个吸顶灯
             const [items, setItems] = useState([
-                { id: 1, name: '办公桌', w: 1.8, h: 0.6, x: 400, y: 150, r: 0, color: '#d97706' },
+                { id: 1, name: '办公桌', w: 1.8, h: 0.6, x: 400, y: 150, r: 0, color: '#d97706', type: 'furniture' },
+                { id: 2, name: '吸顶灯', w: 0.6, h: 0.6, x: 450, y: 250, r: 0, color: '#fef08a', type: 'light' }
             ]);
             const [selectedId, setSelectedId] = useState(null);
             
-            // 添加自定义物品函数
             const addCustomItem = () => {
                 setDrawMode('none');
                 const nx = containerRef.current ? (containerRef.current.scrollLeft+150)/zoom : 100;
                 const ny = containerRef.current ? (containerRef.current.scrollTop+150)/zoom : 100;
-                setItems([...items, {id:Date.now(), name:customConfig.name||'未命名', w:Number(customConfig.w)||1, h:Number(customConfig.h)||1, x:nx, y:ny, r:0, color:customConfig.color||'#8b5cf6'}]);
+                setItems([...items, {id:Date.now(), name:customConfig.name||'未命名', w:Number(customConfig.w)||1, h:Number(customConfig.h)||1, x:nx, y:ny, r:0, color:customConfig.color||'#8b5cf6', type: 'furniture'}]);
             };
 
             const [draggingId, setDraggingId] = useState(null);
@@ -331,7 +340,6 @@
 
             const containerRef = useRef(null);
 
-            // 自动吸附逻辑：寻找距离小于 15 个逻辑像素的墙体端点
             const SNAP_DIST = 15;
             const getSnappedPoint = (x, y, currentWalls) => {
                 for (let w of currentWalls) {
@@ -373,7 +381,6 @@
                 return () => window.removeEventListener('paste', handlePaste);
             }, [viewMode]);
 
-            // --- 鼠标交互事件 ---
             const handlePointerDown = (e, id, logicalX, logicalY) => {
                 e.stopPropagation();
                 const container = containerRef.current;
@@ -381,17 +388,15 @@
                 const pointerLogicalX = (e.clientX - rect.left + container.scrollLeft) / zoom;
                 const pointerLogicalY = (e.clientY - rect.top + container.scrollTop) / zoom;
 
-                // 如果点击的是空白背景 且处于绘制模式
                 if (id === null && drawMode !== 'none') {
                     const snapped = getSnappedPoint(pointerLogicalX, pointerLogicalY, walls);
                     setTempLine({ x1: snapped.x, y1: snapped.y, x2: snapped.x, y2: snapped.y });
                     return;
                 }
 
-                // 正常拖拽模式 (点击了物品/锚点/尺子)
                 if (id !== null) {
                     if (drawMode !== 'none') {
-                        setDrawMode('none'); // 自动退出绘制模式
+                        setDrawMode('none'); 
                         setTempLine(null);
                     }
                     setDraggingId(id);
@@ -408,18 +413,15 @@
                 const pointerLogicalX = (e.clientX - rect.left + container.scrollLeft) / zoom;
                 const pointerLogicalY = (e.clientY - rect.top + container.scrollTop) / zoom;
 
-                // 如果正在绘制
                 if (drawMode !== 'none' && tempLine) {
                     let nx = pointerLogicalX;
                     let ny = pointerLogicalY;
                     
-                    // 1. 优先检测端点自动吸附
                     const snapResult = getSnappedPoint(nx, ny, walls);
                     if (snapResult.snapped) {
                         nx = snapResult.x;
                         ny = snapResult.y;
                     } else {
-                        // 2. 如果没有吸附到端点，则进行简单的正交吸附 (保持水平或垂直)
                         const dx = Math.abs(nx - tempLine.x1);
                         const dy = Math.abs(ny - tempLine.y1);
                         if (dx > dy * 2) ny = tempLine.y1;
@@ -444,10 +446,9 @@
             };
 
             const handlePointerUp = () => {
-                // 如果在绘制状态松开鼠标
                 if (drawMode !== 'none' && tempLine) {
                     const dist = Math.hypot(tempLine.x2 - tempLine.x1, tempLine.y2 - tempLine.y1);
-                    if (dist > 10) { // 过滤掉无意的小点击
+                    if (dist > 10) { 
                         setWalls([...walls, { id: Date.now(), ...tempLine, type: drawMode }]);
                     }
                     setTempLine(null);
@@ -461,14 +462,12 @@
                 return () => window.removeEventListener('pointerup', handlePointerUp);
             });
 
-            // --- 渲染逻辑 ---
             if (viewMode === '3d') {
                 return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} onExit={() => setViewMode('2d')} />;
             }
 
             return (
                 <div className="flex flex-col md:flex-row h-screen w-screen overflow-hidden font-sans text-gray-800">
-                    {/* 左侧控制面板 */}
                     <div className="w-full md:w-[360px] md:h-full h-1/2 flex-shrink-0 bg-white shadow-xl z-20 flex flex-col p-5 overflow-y-auto border-r border-gray-200">
                         <div className="flex justify-between items-center mb-4 border-b pb-3">
                             <h1 className="text-xl font-bold text-gray-900">户型设计与巡游</h1>
@@ -483,7 +482,6 @@
                             </button>
                         </div>
 
-                        {/* 第一步：基础设置 */}
                         <div className="mb-4 space-y-3">
                             <div>
                                 <h2 className="text-sm font-semibold text-gray-700 mb-1">1. 导入平面图</h2>
@@ -511,7 +509,6 @@
                             </div>
                         </div>
 
-                        {/* 第二步：重磅新增 - 墙体放样 */}
                         <div className="mb-4 bg-blue-50 p-3 rounded-lg border border-blue-200">
                             <div className="flex justify-between items-center mb-2">
                                 <h2 className="text-sm font-bold text-blue-800">3. 墙体放样 (描边)</h2>
@@ -545,23 +542,21 @@
                             )}
                         </div>
 
-                        {/* 第三步：家具控制 */}
                         <div className="mb-4">
-                            <h2 className="text-sm font-semibold text-gray-500 mb-2">4. 放置家具</h2>
-                            <div className="grid grid-cols-2 gap-2">
-                                {[{n:'桌子',w:1.8,h:0.6,c:'#d97706'}, {n:'双人床',w:1.5,h:2.0,c:'#be185d'}].map((o,i) => (
+                            <h2 className="text-sm font-semibold text-gray-500 mb-2">4. 放置家具与灯光</h2>
+                            <div className="grid grid-cols-3 gap-2">
+                                {[{n:'桌子',w:1.8,h:0.6,c:'#d97706', t:'furniture'}, {n:'双人床',w:1.5,h:2.0,c:'#be185d', t:'furniture'}, {n:'💡 吸顶灯',w:0.6,h:0.6,c:'#fef08a', t:'light'}].map((o,i) => (
                                     <button key={i} onClick={() => {
-                                        setDrawMode('none'); // 添加家具时自动退出绘制模式
+                                        setDrawMode('none'); 
                                         const nx = containerRef.current ? (containerRef.current.scrollLeft+150)/zoom : 100;
                                         const ny = containerRef.current ? (containerRef.current.scrollTop+150)/zoom : 100;
-                                        setItems([...items, {id:Date.now(), name:o.n, w:o.w, h:o.h, x:nx, y:ny, r:0, color:o.c}]);
+                                        setItems([...items, {id:Date.now(), name:o.n, w:o.w, h:o.h, x:nx, y:ny, r:0, color:o.c, type: o.t}]);
                                     }} className="bg-gray-50 border border-gray-200 hover:bg-gray-100 text-xs py-2 rounded shadow-sm">
                                         + {o.n}
                                     </button>
                                 ))}
                             </div>
                             
-                            {/* 自定义家具面板 */}
                             <div className="bg-purple-50 p-3 rounded-lg border border-purple-200 mt-3 shadow-sm">
                                 <p className="text-sm font-medium mb-2 text-purple-800">✏️ 自定义家具</p>
                                 <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
@@ -588,10 +583,9 @@
                             </div>
                         </div>
 
-                        {/* 选中家具编辑 */}
                         {selectedId && selectedId !== 'ruler' && selectedId !== 'origin' && drawMode === 'none' && (
                             <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mt-auto">
-                                <p className="text-xs font-bold mb-2">编辑选中家具</p>
+                                <p className="text-xs font-bold mb-2">编辑选中物品</p>
                                 <div className="flex gap-2 mb-2">
                                     <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r-90)%360}:i))} className="flex-1 bg-white border py-1 rounded text-xs">↺ 转</button>
                                     <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r+90)%360}:i))} className="flex-1 bg-white border py-1 rounded text-xs">↻ 转</button>
@@ -601,15 +595,13 @@
                         )}
                     </div>
 
-                    {/* 右侧画布区域 */}
                     <div 
                         className={`flex-1 relative overflow-auto grid-bg-dynamic ${drawMode !== 'none' ? 'cursor-crosshair' : 'cursor-default'} no-scrollbar touch-none`}
                         ref={containerRef}
                         onPointerMove={handlePointerMove}
-                        onPointerDown={(e) => handlePointerDown(e, null, 0, 0)} // 用于捕捉画布空白处的点击绘制
+                        onPointerDown={(e) => handlePointerDown(e, null, 0, 0)} 
                         style={{ backgroundSize: `${20 * zoom}px ${20 * zoom}px` }} 
                     >
-                        {/* 缩放控制 */}
                         <div className="fixed md:absolute bottom-6 right-6 flex items-center bg-white shadow-xl rounded-lg border z-50 text-sm">
                             <button onClick={() => setZoom(z => Math.max(0.1, Number((z - 0.1).toFixed(2))))} className="px-3 py-2 border-r">➖</button>
                             <span className="px-4 py-2 min-w-[4rem] text-center">{Math.round(zoom * 100)}%</span>
@@ -624,7 +616,6 @@
                             />
                         )}
 
-                        {/* --- 绘制的墙体和窗户 SVG 叠层 --- */}
                         <svg className="absolute top-0 left-0 pointer-events-none" style={{ width: '10000px', height: '10000px', zIndex: 5 }}>
                             {walls.map(w => (
                                 <line key={w.id} 
@@ -636,7 +627,6 @@
                                     opacity={w.type === 'window' ? 0.7 : 0.9}
                                 />
                             ))}
-                            {/* 正在拖拽预览的线段 */}
                             {tempLine && (
                                 <line 
                                     x1={tempLine.x1 * zoom} y1={tempLine.y1 * zoom} 
@@ -649,7 +639,6 @@
                             )}
                         </svg>
 
-                        {/* 3D 坐标系原点 (核心锚点) */}
                         <div 
                             className="absolute flex flex-col items-center justify-center z-50 cursor-move drop-shadow-xl"
                             style={{ left: `${originPos.x * zoom}px`, top: `${originPos.y * zoom}px`, transform: 'translate(-50%, -50%)', touchAction: 'none' }}
@@ -663,7 +652,6 @@
                             </span>
                         </div>
 
-                        {/* 比例尺 */}
                         {showRuler && (
                             <div className={`absolute bg-yellow-400/80 border-2 border-yellow-600 shadow-md z-40 cursor-move ${selectedId==='ruler'?'ring-2 ring-yellow-400':''}`}
                                 style={{ width: `${rulerLength * ppm * zoom}px`, height: '8px', left: `${rulerState.x * zoom}px`, top: `${rulerState.y * zoom}px`, transform: `rotate(${rulerState.r}deg)`, borderRadius: '4px', touchAction: 'none' }}
@@ -675,7 +663,6 @@
                             </div>
                         )}
 
-                        {/* 家具 */}
                         {items.map(item => (
                             <div key={item.id} className="absolute flex flex-col items-center justify-center cursor-move select-none transition-shadow"
                                 style={{
@@ -684,12 +671,14 @@
                                     backgroundColor: `${item.color}ee`, 
                                     border: item.id === selectedId ? '3px solid #000' : '2px solid rgba(0,0,0,0.5)',
                                     boxShadow: item.id === selectedId ? '0 10px 20px -5px rgba(0,0,0,0.5)' : '0 4px 6px -1px rgba(0,0,0,0.3)',
-                                    zIndex: item.id === selectedId ? 30 : 10, borderRadius: '4px', touchAction: 'none'
+                                    zIndex: item.id === selectedId ? 30 : 10, 
+                                    borderRadius: item.type === 'light' ? '50%' : '4px', // 灯具在2D中显示为圆形
+                                    touchAction: 'none'
                                 }}
                                 onPointerDown={(e) => handlePointerDown(e, item.id, item.x, item.y)}
                             >
                                 <div className="flex flex-col items-center justify-center w-full h-full pointer-events-none" style={{ transform: `scale(${Math.min(zoom, 1)})` }}>
-                                    <span className="text-white font-bold drop-shadow-md text-sm text-center leading-tight">
+                                    <span className="text-gray-900 font-bold drop-shadow-md text-sm text-center leading-tight mix-blend-difference text-white">
                                         {item.name}<br/><span className="text-xs opacity-80">{item.w}m x {item.h}m</span>
                                     </span>
                                 </div>
