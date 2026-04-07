@@ -443,7 +443,7 @@
                         </div>
                     </div>
 
-                    {/* --- 面板 1：窗户调节面板 (新增窗洞宽度伸缩) --- */}
+                    {/* --- 面板 1：窗户调节面板 --- */}
                     {activeWin && (
                         <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-[90%] max-w-2xl pointer-events-auto transition-all">
                             <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
@@ -467,7 +467,7 @@
                         </div>
                     )}
 
-                    {/* --- 面板 2：家具调节面板 (新增悬空/三维位移控制) --- */}
+                    {/* --- 面板 2：家具调节面板 --- */}
                     {activeFurn && (
                         <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-purple-200 z-30 w-[90%] max-w-2xl pointer-events-auto transition-all">
                             <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
@@ -518,6 +518,8 @@
             const [guides, setGuides] = useState([]);
             const [snapPoint, setSnapPoint] = useState(null); 
 
+            const [isFurnitureExpanded, setIsFurnitureExpanded] = useState(false);
+
             const [customConfig, setCustomConfig] = useState({ name: '自定义', w: 1.0, h: 1.0, d: 0.75, elevation: 0, color: '#8b5cf6', type: 'box' });
 
             const [items, setItems] = useState([
@@ -531,11 +533,9 @@
             const [modal, setModal] = useState(null);
             const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000); };
 
-            // 修改属性的方法
             const handleUpdateWall = (id, updates) => setWalls(prevWalls => prevWalls.map(w => w.id === id ? { ...w, ...updates } : w));
             const handleUpdateItem = (id, updates) => setItems(prevItems => prevItems.map(i => i.id === id ? { ...i, ...updates } : i));
             
-            // 窗户扩展收缩修补相连墙体算法
             const handleUpdateWindowWidth = (id, newLogicalWidth) => {
                 setWalls(prevWalls => {
                     const wIdx = prevWalls.findIndex(w => w.id === id);
@@ -553,7 +553,7 @@
                     return prevWalls.map(wall => {
                         if (wall.id === id) return { ...wall, x1: nx1, y1: ny1, x2: nx2, y2: ny2 };
                         let newWall = { ...wall };
-                        const TOL = 0.5; // 节点修补容差
+                        const TOL = 0.5;
                         if (Math.hypot(wall.x1 - w.x1, wall.y1 - w.y1) < TOL) { newWall.x1 = nx1; newWall.y1 = ny1; }
                         if (Math.hypot(wall.x2 - w.x1, wall.y2 - w.y1) < TOL) { newWall.x2 = nx1; newWall.y2 = ny1; }
                         if (Math.hypot(wall.x1 - w.x2, wall.y1 - w.y2) < TOL) { newWall.x1 = nx2; newWall.y1 = ny2; }
@@ -849,49 +849,61 @@
                             {walls.length > 0 && <div className="flex justify-between items-center mt-2 border-t border-blue-200 pt-2"><span className="text-xs text-blue-700">已画线段: {walls.length} 条</span>{drawMode === 'none' && <span className="text-xs text-amber-600 font-bold animate-pulse">可点选图纸删除墙</span>}</div>}
                         </div>
 
+                        {/* --- 核心优化：将家具面板折叠 --- */}
                         <div className="mb-4">
-                            <h2 className="text-sm font-semibold text-gray-500 mb-2">4. 放置参数化家具</h2>
-                            <div className="grid grid-cols-3 gap-2">
-                                {[
-                                    {n:'桌子',w:1.6,h:0.6,d:0.75,e:0,c:'#d97706', t:'table'}, 
-                                    {n:'椅子',w:0.45,h:0.45,d:0.9,e:0,c:'#4b5563', t:'chair'}, 
-                                    {n:'双人床',w:1.8,h:2.0,d:1.0,e:0,c:'#be185d', t:'bed'}, 
-                                    {n:'大衣柜',w:2.0,h:0.6,d:2.4,e:0,c:'#854d0e', t:'wardrobe'}, 
-                                    {n:'陈列架',w:0.8,h:0.3,d:1.8,e:0,c:'#374151', t:'rack'}, 
-                                    {n:'马桶',w:0.4,h:0.7,d:0.8,e:0,c:'#f8fafc', t:'toilet'},
-                                    {n:'洗手盆',w:0.8,h:0.5,d:0.85,e:0,c:'#e2e8f0', t:'basin'},
-                                    {n:'厨房地柜',w:1.2,h:0.6,d:0.8,e:0,c:'#94a3b8', t:'cabinet'},
-                                    {n:'厨房吊柜',w:1.0,h:0.35,d:0.8,e:1.6,c:'#e0e7ff', t:'cabinet'}, 
-                                    {n:'💡 吸顶灯',w:0.6,h:0.6,d:0.05,e:undefined,c:'#fef08a', t:'light'}
-                                ].map((o,i) => (
-                                    <button key={i} onClick={() => {
-                                        setDrawMode('none'); 
-                                        const nx = containerRef.current ? (containerRef.current.scrollLeft+150)/zoom : 100;
-                                        const ny = containerRef.current ? (containerRef.current.scrollTop+150)/zoom : 100;
-                                        setItems([...items, {id:Date.now(), name:o.n, w:o.w, h:o.h, d:o.d, elevation:o.e, x:nx, y:ny, r:0, color:o.c, type: o.t}]);
-                                    }} className="bg-gray-50 border border-gray-200 hover:bg-gray-100 text-[11px] py-2 rounded shadow-sm font-bold truncate px-1">
-                                        + {o.n}
-                                    </button>
-                                ))}
-                            </div>
+                            <button 
+                                onClick={() => setIsFurnitureExpanded(!isFurnitureExpanded)} 
+                                className="w-full flex justify-between items-center bg-gray-100 hover:bg-gray-200 border border-gray-200 p-2 rounded-lg transition-colors cursor-pointer"
+                            >
+                                <h2 className="text-sm font-bold text-gray-700">4. 放置参数化家具 🛋️</h2>
+                                <span className="text-gray-500 text-xs">{isFurnitureExpanded ? '▼ 收起' : '▶ 展开'}</span>
+                            </button>
                             
-                            <div className="bg-purple-50 p-3 rounded-lg border border-purple-200 mt-3 shadow-sm">
-                                <p className="text-sm font-medium mb-2 text-purple-800">✏️ 自定义添加</p>
-                                <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
-                                    <div><label className="block text-gray-600 mb-1">名称</label><input type="text" value={customConfig.name} onChange={e => setCustomConfig({...customConfig, name: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                    <div><label className="block text-gray-600 mb-1">类别</label>
-                                        <select value={customConfig.type} onChange={e => setCustomConfig({...customConfig, type: e.target.value})} className="w-full border rounded px-1 py-1 bg-white">
-                                            <option value="box">基础方块</option><option value="table">桌子</option><option value="chair">椅子</option><option value="bed">床铺</option><option value="wardrobe">衣柜</option><option value="rack">层架</option><option value="cabinet">地/吊柜</option><option value="toilet">马桶</option><option value="basin">洗手盆</option>
-                                        </select>
+                            {isFurnitureExpanded && (
+                                <div className="mt-3">
+                                    <div className="grid grid-cols-3 gap-2">
+                                        {[
+                                            {n:'桌子',w:1.6,h:0.6,d:0.75,e:0,c:'#d97706', t:'table'}, 
+                                            {n:'椅子',w:0.45,h:0.45,d:0.9,e:0,c:'#4b5563', t:'chair'}, 
+                                            {n:'双人床',w:1.8,h:2.0,d:1.0,e:0,c:'#be185d', t:'bed'}, 
+                                            {n:'大衣柜',w:2.0,h:0.6,d:2.4,e:0,c:'#854d0e', t:'wardrobe'}, 
+                                            {n:'陈列架',w:0.8,h:0.3,d:1.8,e:0,c:'#374151', t:'rack'}, 
+                                            {n:'马桶',w:0.4,h:0.7,d:0.8,e:0,c:'#f8fafc', t:'toilet'},
+                                            {n:'洗手盆',w:0.8,h:0.5,d:0.85,e:0,c:'#e2e8f0', t:'basin'},
+                                            {n:'厨房地柜',w:1.2,h:0.6,d:0.8,e:0,c:'#94a3b8', t:'cabinet'},
+                                            {n:'厨房吊柜',w:1.0,h:0.35,d:0.8,e:1.6,c:'#e0e7ff', t:'cabinet'}, 
+                                            {n:'💡 吸顶灯',w:0.6,h:0.6,d:0.05,e:undefined,c:'#fef08a', t:'light'}
+                                        ].map((o,i) => (
+                                            <button key={i} onClick={() => {
+                                                setDrawMode('none'); 
+                                                const nx = containerRef.current ? (containerRef.current.scrollLeft+150)/zoom : 100;
+                                                const ny = containerRef.current ? (containerRef.current.scrollTop+150)/zoom : 100;
+                                                setItems([...items, {id:Date.now(), name:o.n, w:o.w, h:o.h, d:o.d, elevation:o.e, x:nx, y:ny, r:0, color:o.c, type: o.t}]);
+                                            }} className="bg-gray-50 border border-gray-200 hover:bg-gray-100 text-[11px] py-2 rounded shadow-sm font-bold truncate px-1">
+                                                + {o.n}
+                                            </button>
+                                        ))}
                                     </div>
-                                    <div><label className="block text-gray-600 mb-1">宽(X) m</label><input type="number" step="0.1" value={customConfig.w} onChange={e => setCustomConfig({...customConfig, w: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                    <div><label className="block text-gray-600 mb-1">深(Y) m</label><input type="number" step="0.1" value={customConfig.h} onChange={e => setCustomConfig({...customConfig, h: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                    <div><label className="block text-gray-600 mb-1">高(Z) m</label><input type="number" step="0.1" value={customConfig.d} onChange={e => setCustomConfig({...customConfig, d: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                    <div><label className="block text-gray-600 mb-1">离地高度 m</label><input type="number" step="0.1" value={customConfig.elevation} onChange={e => setCustomConfig({...customConfig, elevation: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
-                                    <div className="col-span-2"><label className="block text-gray-600 mb-1">颜色</label><input type="color" value={customConfig.color} onChange={e => setCustomConfig({...customConfig, color: e.target.value})} className="w-full h-6 border rounded cursor-pointer bg-white" /></div>
+                                    
+                                    <div className="bg-purple-50 p-3 rounded-lg border border-purple-200 mt-3 shadow-sm">
+                                        <p className="text-sm font-medium mb-2 text-purple-800">✏️ 自定义添加</p>
+                                        <div className="grid grid-cols-2 gap-2 mb-2 text-xs">
+                                            <div><label className="block text-gray-600 mb-1">名称</label><input type="text" value={customConfig.name} onChange={e => setCustomConfig({...customConfig, name: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
+                                            <div><label className="block text-gray-600 mb-1">类别</label>
+                                                <select value={customConfig.type} onChange={e => setCustomConfig({...customConfig, type: e.target.value})} className="w-full border rounded px-1 py-1 bg-white">
+                                                    <option value="box">基础方块</option><option value="table">桌子</option><option value="chair">椅子</option><option value="bed">床铺</option><option value="wardrobe">衣柜</option><option value="rack">层架</option><option value="cabinet">地/吊柜</option><option value="toilet">马桶</option><option value="basin">洗手盆</option>
+                                                </select>
+                                            </div>
+                                            <div><label className="block text-gray-600 mb-1">宽(X) m</label><input type="number" step="0.1" value={customConfig.w} onChange={e => setCustomConfig({...customConfig, w: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
+                                            <div><label className="block text-gray-600 mb-1">深(Y) m</label><input type="number" step="0.1" value={customConfig.h} onChange={e => setCustomConfig({...customConfig, h: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
+                                            <div><label className="block text-gray-600 mb-1">高(Z) m</label><input type="number" step="0.1" value={customConfig.d} onChange={e => setCustomConfig({...customConfig, d: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
+                                            <div><label className="block text-gray-600 mb-1">离地高度 m</label><input type="number" step="0.1" value={customConfig.elevation} onChange={e => setCustomConfig({...customConfig, elevation: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
+                                            <div className="col-span-2"><label className="block text-gray-600 mb-1">颜色</label><input type="color" value={customConfig.color} onChange={e => setCustomConfig({...customConfig, color: e.target.value})} className="w-full h-6 border rounded cursor-pointer bg-white" /></div>
+                                        </div>
+                                        <button onClick={addCustomItem} className="w-full bg-purple-600 hover:bg-purple-700 text-white py-1.5 rounded text-sm transition shadow-sm cursor-pointer">➕ 添加</button>
+                                    </div>
                                 </div>
-                                <button onClick={addCustomItem} className="w-full bg-purple-600 hover:bg-purple-700 text-white py-1.5 rounded text-sm transition shadow-sm cursor-pointer">➕ 添加</button>
-                            </div>
+                            )}
                         </div>
 
                         {(selectedId && selectedId !== 'ruler' && selectedId !== 'origin' && drawMode === 'none') && (() => {
