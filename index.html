@@ -199,6 +199,18 @@
                             addPart(0.04, seatH, 0.04, w/2-0.04, seatH/2, h/2-0.04);
                             addPart(w, d - seatH, 0.04, 0, seatH + (d - seatH)/2, -h/2+0.02); 
                             break;
+                        case 'sofa':
+                            // 底座
+                            addPart(w, 0.1, h, 0, 0.05, 0);
+                            // 坐垫
+                            const cushionMat = new THREE.MeshStandardMaterial({ color: baseColor, roughness: 0.9, emissive: isSelected ? 0x222222 : 0 });
+                            addPart(w - 0.3, d * 0.4, h - 0.2, 0, 0.1 + (d * 0.4)/2, 0.1, cushionMat);
+                            // 靠背
+                            addPart(w, d, 0.2, 0, d/2, -h/2 + 0.1);
+                            // 两侧扶手
+                            addPart(0.15, d * 0.65, h, -w/2 + 0.075, (d * 0.65)/2, 0);
+                            addPart(0.15, d * 0.65, h, w/2 - 0.075, (d * 0.65)/2, 0);
+                            break;
                         case 'bed':
                             addPart(w, 0.2, h, 0, 0.1, 0); 
                             const mattressMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.9, emissive: isSelected ? 0x222222 : 0 });
@@ -924,6 +936,8 @@
                                         {[
                                             {n:'桌子',w:1.6,h:0.6,d:0.75,e:0,c:'#d97706', t:'table'}, 
                                             {n:'椅子',w:0.45,h:0.45,d:0.9,e:0,c:'#4b5563', t:'chair'}, 
+                                            {n:'单人沙发',w:0.9,h:0.8,d:0.8,e:0,c:'#64748b', t:'sofa'},
+                                            {n:'三人沙发',w:2.1,h:0.8,d:0.8,e:0,c:'#64748b', t:'sofa'},
                                             {n:'双人床',w:1.8,h:2.0,d:1.0,e:0,c:'#be185d', t:'bed'}, 
                                             {n:'大衣柜',w:2.0,h:0.6,d:2.4,e:0,c:'#854d0e', t:'wardrobe'}, 
                                             {n:'陈列架',w:0.8,h:0.3,d:1.8,e:0,c:'#374151', t:'rack'}, 
@@ -950,7 +964,7 @@
                                             <div><label className="block text-gray-600 mb-1">名称</label><input type="text" value={customConfig.name} onChange={e => setCustomConfig({...customConfig, name: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
                                             <div><label className="block text-gray-600 mb-1">类别</label>
                                                 <select value={customConfig.type} onChange={e => setCustomConfig({...customConfig, type: e.target.value})} className="w-full border rounded px-1 py-1 bg-white">
-                                                    <option value="box">基础方块</option><option value="table">桌子</option><option value="chair">椅子</option><option value="bed">床铺</option><option value="wardrobe">衣柜</option><option value="rack">层架</option><option value="cabinet">地/吊柜</option><option value="toilet">马桶</option><option value="basin">洗手盆</option>
+                                                    <option value="box">基础方块</option><option value="table">桌子</option><option value="chair">椅子</option><option value="sofa">沙发</option><option value="bed">床铺</option><option value="wardrobe">衣柜</option><option value="rack">层架</option><option value="cabinet">地/吊柜</option><option value="toilet">马桶</option><option value="basin">洗手盆</option>
                                                 </select>
                                             </div>
                                             <div><label className="block text-gray-600 mb-1">宽(X) m</label><input type="number" step="0.1" value={customConfig.w} onChange={e => setCustomConfig({...customConfig, w: e.target.value})} className="w-full border rounded px-1 py-1" /></div>
