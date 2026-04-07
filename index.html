@@ -42,12 +42,18 @@
         // ==========================================
         // 3D 视图组件
         // ==========================================
-        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, onUpdateWall, onExit }) => {
+        const RoomViewer3D = ({ items, ppm, originPos, walls, wallHeight, wallThickness, onUpdateWall, onExit }) => {
             const mountRef = useRef(null);
             const minimapRef = useRef(null);
             
             // 当前在 3D 中被选中的窗户 ID
             const [selectedWinId, setSelectedWinId] = useState(null);
+
+            // --- 核心修复：保存相机的持久化状态，防止重绘时视角重置 ---
+            const cameraStateRef = useRef({
+                x: 0, y: 1.6, z: 0,
+                yaw: 0, pitch: 0
+            });
 
             useEffect(() => {
                 let animationId;
@@ -58,7 +64,9 @@
                 scene.fog = new THREE.Fog(0xf0f4f8, 2, 20);
 
                 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 100);
-                camera.position.set(0, 1.6, 0); 
+                
+                // 每次刷新场景时，从持久化引用中恢复相机的绝对位置
+                camera.position.set(cameraStateRef.current.x, cameraStateRef.current.y, cameraStateRef.current.z); 
                 camera.rotation.order = 'YXZ';
 
                 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -69,28 +77,46 @@
 
                 scene.add(new THREE.AmbientLight(0xffffff, 0.6));
                 const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.4);
-                hemiLight.position.set(0, 20, 0);
+                hemiLight.position.set(0, wallHeight, 0); // 将天光高度降至您设置的屋顶高度
                 scene.add(hemiLight);
 
                 const dirLight = new THREE.DirectionalLight(0xffffff, 0.3);
-                dirLight.position.set(5, 10, 5);
+                dirLight.position.set(5, wallHeight, 5); // 将主光源高度降至屋顶高度，修正拉长阴影
                 dirLight.castShadow = true;
                 scene.add(dirLight);
 
-                const floorGeo = new THREE.PlaneGeometry(50, 50);
-                const floorMat = new THREE.MeshStandardMaterial({ color: 0xdddddd, roughness: 0.8 });
+                // --- 1. 深色水泥质感地面 ---
+                const floorGeo = new THREE.PlaneGeometry(100, 100);
+                const floorMat = new THREE.MeshStandardMaterial({ 
+                    color: 0x7a7c7f, 
+                    roughness: 0.95,
+                    metalness: 0.05
+                });
                 const floor = new THREE.Mesh(floorGeo, floorMat);
                 floor.rotation.x = -Math.PI / 2;
                 floor.receiveShadow = true;
                 scene.add(floor);
                 
-                const gridHelper = new THREE.GridHelper(50, 50, 0x000000, 0x000000);
+                // --- 2. 智能单面可见屋顶 ---
+                const ceilingGeo = new THREE.PlaneGeometry(100, 100);
+                const ceilingMat = new THREE.MeshStandardMaterial({ 
+                    color: 0xf5f5f5, 
+                    roughness: 0.9,
+                    side: THREE.FrontSide // 关键设置：只渲染朝下的一面
+                });
+                const ceiling = new THREE.Mesh(ceilingGeo, ceilingMat);
+                ceiling.rotation.x = Math.PI / 2; // 旋转使其正朝下方
+                ceiling.position.y = wallHeight;
+                ceiling.receiveShadow = true;
+                scene.add(ceiling);
+                
+                const gridHelper = new THREE.GridHelper(100, 100, 0x000000, 0x000000);
                 gridHelper.material.transparent = true;
-                gridHelper.material.opacity = 0.1;
+                gridHelper.material.opacity = 0.08;
                 scene.add(gridHelper);
 
                 // --- 构建 3D 墙体与可交互的窗户 ---
-                const thickness = 0.15;
+                const thickness = wallThickness; // 使用用户设置的动态墙体厚度
                 const solidWallMat = new THREE.MeshStandardMaterial({ color: 0xe2e4e6, roughness: 0.85 });
                 const glassMat = new THREE.MeshStandardMaterial({ color: 0x88ccff, transparent: true, opacity: 0.4, roughness: 0.1 });
                 // 被选中的窗户发黄光
@@ -121,19 +147,20 @@
                     };
 
                     if (w.type === 'solid') {
-                        createBox(thickness, wallHeight, length + thickness * 0.5, wallHeight / 2, solidWallMat);
+                        // 移除圆角柱体，采用方正延伸算法：长度加上墙厚，让垂直的墙角完美形成正方体交叠
+                        createBox(thickness, wallHeight, length + thickness, wallHeight / 2, solidWallMat);
                     } else if (w.type === 'window') {
                         // 读取用户自定义高度，若无则给默认值
                         const sillHeight = w.sillHeight !== undefined ? w.sillHeight : 0.9; 
                         const winHeight = w.winHeight !== undefined ? w.winHeight : 1.4;  
                         
-                        // 下墙(窗台)
-                        createBox(thickness, sillHeight, length + thickness * 0.5, sillHeight / 2, solidWallMat);
+                        // 下墙(窗台) 也需要延伸填角
+                        createBox(thickness, sillHeight, length + thickness, sillHeight / 2, solidWallMat);
                         
-                        // 上墙(横梁)
+                        // 上墙(横梁) 也需要延伸填角
                         const headerHeight = wallHeight - sillHeight - winHeight;
                         if (headerHeight > 0) {
-                            createBox(thickness, headerHeight, length + thickness * 0.5, wallHeight - headerHeight / 2, solidWallMat);
+                            createBox(thickness, headerHeight, length + thickness, wallHeight - headerHeight / 2, solidWallMat);
                         }
                         
                         // 玻璃
@@ -175,7 +202,14 @@
 
                 // --- 交互与光线投射 (Raycasting) 逻辑 ---
                 const moveState = { forward: false, backward: false, left: false, right: false };
-                let isDragging = false, prevMouse = { x: 0, y: 0 }, yaw = 0, pitch = 0;
+                let isDragging = false, prevMouse = { x: 0, y: 0 };
+                
+                // 从持久化状态读取初始的偏航角和俯仰角
+                let yaw = cameraStateRef.current.yaw;
+                let pitch = cameraStateRef.current.pitch;
+                camera.rotation.y = yaw; 
+                camera.rotation.x = pitch;
+                
                 let clickStartX = 0, clickStartY = 0;
                 
                 const raycaster = new THREE.Raycaster();
@@ -190,23 +224,17 @@
                 
                 const onUp = (e) => { 
                     isDragging = false; 
-                    // 检查是拖动还是单纯的点击
                     const currentX = e.clientX || (e.changedTouches ? e.changedTouches[0].clientX : clickStartX);
                     const currentY = e.clientY || (e.changedTouches ? e.changedTouches[0].clientY : clickStartY);
                     
-                    if (Math.abs(currentX - clickStartX) < 5 && Math.abs(currentY - clickStartY) < 5) {
-                        // 判定为点击，执行射线检测
+                    if (Math.abs(currentX - clickStartX) < 10 && Math.abs(currentY - clickStartY) < 10) {
                         mouse.x = (currentX / window.innerWidth) * 2 - 1;
                         mouse.y = -(currentY / window.innerHeight) * 2 + 1;
                         raycaster.setFromCamera(mouse, camera);
                         
                         const intersects = raycaster.intersectObjects(interactableWindows);
                         if (intersects.length > 0) {
-                            // 选到了窗户
                             setSelectedWinId(intersects[0].object.userData.id);
-                        } else {
-                            // 点击了空白处或墙壁，取消选中
-                            setSelectedWinId(null);
                         }
                     }
                 };
@@ -219,6 +247,10 @@
                     pitch = Math.max(-Math.PI/2+0.1, Math.min(Math.PI/2-0.1, pitch));
                     camera.rotation.y = yaw; camera.rotation.x = pitch;
                     prevMouse = { x: clientX, y: clientY };
+                    
+                    // --- 实时保存视角的持久化状态 ---
+                    cameraStateRef.current.yaw = yaw;
+                    cameraStateRef.current.pitch = pitch;
                 };
 
                 container.addEventListener('mousedown', onDown); document.addEventListener('mouseup', onUp); document.addEventListener('mousemove', onMove);
@@ -293,6 +325,11 @@
                     if (moveState.left) camera.position.add(right.clone().multiplyScalar(-speed));
                     if (moveState.right) camera.position.add(right.clone().multiplyScalar(speed));
 
+                    // --- 实时保存相机位置的持久化状态 ---
+                    cameraStateRef.current.x = camera.position.x;
+                    cameraStateRef.current.y = camera.position.y;
+                    cameraStateRef.current.z = camera.position.z;
+
                     renderer.render(scene, camera);
                     drawMinimap(); 
                 };
@@ -313,12 +350,10 @@
                     window.removeEventListener('resize', onResize);
                     if (container) container.innerHTML = '';
                 };
-            }, [items, ppm, originPos, walls, wallHeight, selectedWinId]); // 将 selectedWinId 加入依赖以触发高亮渲染
+            }, [items, ppm, originPos, walls, wallHeight, wallThickness, selectedWinId]);
 
-            // 获取当前选中的窗户数据以供 UI 面板使用
             const activeWin = walls.find(w => w.id === selectedWinId);
             
-            // 窗户调整逻辑，确保窗户+窗台不能大于墙高
             const handleSillChange = (e) => {
                 let v = Number(e.target.value);
                 let currentWinH = activeWin.winHeight !== undefined ? activeWin.winHeight : 1.4;
@@ -355,16 +390,18 @@
                         </div>
                     </div>
 
-                    {/* --- 新增：浮动在 3D 上的窗户编辑面板 --- */}
                     {activeWin && (
-                        <div className="absolute right-4 top-1/2 transform -translate-y-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-72 pointer-events-auto transition-all">
-                            <div className="flex justify-between items-center mb-4">
+                        <div className="absolute bottom-8 left-1/2 transform -translate-x-1/2 bg-white/95 p-5 rounded-2xl shadow-2xl backdrop-blur-md border border-amber-200 z-30 w-[90%] max-w-lg pointer-events-auto transition-all">
+                            <div className="flex justify-between items-center mb-4 border-b border-gray-100 pb-2">
                                 <h3 className="font-bold text-gray-800 flex items-center gap-2"><span className="text-xl">🪟</span> 窗户高度调节</h3>
-                                <button onClick={() => setSelectedWinId(null)} className="text-gray-400 hover:text-red-500 font-bold text-lg leading-none">&times;</button>
+                                <div className="flex items-center gap-4">
+                                    <span className="text-xs text-amber-600 bg-amber-50 px-2 py-1 rounded-full animate-pulse">💡 您现在可以自由拖动屏幕转换视角查看！</span>
+                                    <button onClick={() => setSelectedWinId(null)} className="text-gray-400 hover:text-red-500 font-bold text-2xl leading-none">&times;</button>
+                                </div>
                             </div>
                             
-                            <div className="space-y-5">
-                                <div>
+                            <div className="flex flex-col sm:flex-row gap-6">
+                                <div className="flex-1">
                                     <div className="flex justify-between text-sm mb-1 text-gray-700">
                                         <label className="font-medium">离地高度 (窗台)</label>
                                         <span className="font-bold text-amber-600">{(activeWin.sillHeight !== undefined ? activeWin.sillHeight : 0.9).toFixed(2)} m</span>
@@ -377,7 +414,7 @@
                                     />
                                 </div>
                                 
-                                <div>
+                                <div className="flex-1">
                                     <div className="flex justify-between text-sm mb-1 text-gray-700">
                                         <label className="font-medium">窗户自身高度</label>
                                         <span className="font-bold text-blue-600">{(activeWin.winHeight !== undefined ? activeWin.winHeight : 1.4).toFixed(2)} m</span>
@@ -388,10 +425,6 @@
                                         onChange={handleWinChange}
                                         className="w-full accent-blue-500" 
                                     />
-                                </div>
-                                
-                                <div className="pt-3 border-t border-gray-100 text-xs text-gray-400 text-center">
-                                    调整完毕后，数据会自动绑定，并在退出时保存到存档中。
                                 </div>
                             </div>
                         </div>
@@ -413,9 +446,12 @@
             const [originPos, setOriginPos] = useState({ x: 250, y: 250 });
 
             const [wallHeight, setWallHeight] = useState(2.6);
+            const [wallThickness, setWallThickness] = useState(0.2);
             const [walls, setWalls] = useState([]); 
             const [drawMode, setDrawMode] = useState('none'); 
             const [tempLine, setTempLine] = useState(null);
+            const [guides, setGuides] = useState([]);
+            const [snapPoint, setSnapPoint] = useState(null); // 新增：磁吸反馈点
 
             const [customConfig, setCustomConfig] = useState({ name: '自定义物品', w: 1.0, h: 1.0, color: '#8b5cf6' });
 
@@ -424,8 +460,8 @@
                 { id: 2, name: '吸顶灯', w: 0.6, h: 0.6, x: 450, y: 250, r: 0, color: '#fef08a', type: 'light' }
             ]);
             const [selectedId, setSelectedId] = useState(null);
+            const [selectedWallId, setSelectedWallId] = useState(null);
             
-            // --- 新增：专门用于更新特定墙体/窗户属性的方法 ---
             const handleUpdateWall = (id, updates) => {
                 setWalls(prevWalls => prevWalls.map(w => w.id === id ? { ...w, ...updates } : w));
             };
@@ -446,7 +482,7 @@
                 const newSave = {
                     id: Date.now().toString(),
                     name: saveName,
-                    walls, items, ppm, originPos, wallHeight, 
+                    walls, items, ppm, originPos, wallHeight, wallThickness,
                     bgImage: bgImage 
                 };
                 
@@ -474,6 +510,7 @@
                     setPpm(target.ppm || 120);
                     setOriginPos(target.originPos || { x: 250, y: 250 });
                     setWallHeight(target.wallHeight || 2.6);
+                    setWallThickness(target.wallThickness || 0.2);
                     if (target.bgImage) setBgImage(target.bgImage);
                     alert("读取成功！");
                 }
@@ -513,7 +550,7 @@
                 return { dist: Math.hypot(x - nx, y - ny), x: nx, y: ny };
             };
 
-            const SNAP_DIST = 20; 
+            const SNAP_DIST = 30; // 加大磁吸触发距离
             const getSnappedPoint = (x, y, currentWalls) => {
                 let bestDist = SNAP_DIST;
                 let bestPt = { x, y, snapped: false };
@@ -578,6 +615,9 @@
                 if (id === null && drawMode !== 'none') {
                     const snapped = getSnappedPoint(pointerLogicalX, pointerLogicalY, walls);
                     setTempLine({ x1: snapped.x, y1: snapped.y, x2: snapped.x, y2: snapped.y });
+                    setSelectedWallId(null);
+                    setSelectedId(null);
+                    setSnapPoint({ x: snapped.x, y: snapped.y });
                     return;
                 }
 
@@ -585,12 +625,21 @@
                     if (drawMode !== 'none') {
                         setDrawMode('none'); 
                         setTempLine(null);
+                        setGuides([]);
+                        setSnapPoint(null);
                     }
-                    setDraggingId(id);
-                    setSelectedId(id);
-                    setDragOffset({ x: pointerLogicalX - logicalX, y: pointerLogicalY - logicalY });
+                    if (id.toString().startsWith('wall_')) {
+                        setSelectedWallId(id.replace('wall_', ''));
+                        setSelectedId(null);
+                    } else {
+                        setDraggingId(id);
+                        setSelectedId(id);
+                        setSelectedWallId(null);
+                        setDragOffset({ x: pointerLogicalX - logicalX, y: pointerLogicalY - logicalY });
+                    }
                 } else {
                     setSelectedId(null);
+                    setSelectedWallId(null);
                 }
             };
 
@@ -603,18 +652,42 @@
                 if (drawMode !== 'none' && tempLine) {
                     let nx = pointerLogicalX;
                     let ny = pointerLogicalY;
+                    let activeGuides = [];
                     
                     const snapResult = getSnappedPoint(nx, ny, walls);
                     if (snapResult.snapped) {
                         nx = snapResult.x;
                         ny = snapResult.y;
+                        setSnapPoint({ x: nx, y: ny }); // 记录吸附点
                     } else {
+                        setSnapPoint(null); // 清除吸附点
+
                         const dx = Math.abs(nx - tempLine.x1);
                         const dy = Math.abs(ny - tempLine.y1);
-                        if (dx > dy * 1.5) ny = tempLine.y1;
-                        else if (dy > dx * 1.5) nx = tempLine.x1;
+                        let forceOrthoX = false, forceOrthoY = false;
+
+                        if (dx > dy * 1.5) forceOrthoY = true;
+                        else if (dy > dx * 1.5) forceOrthoX = true;
+
+                        if (forceOrthoY) ny = tempLine.y1;
+                        if (forceOrthoX) nx = tempLine.x1;
+
+                        const GUIDE_TOLERANCE = 10;
+                        let minDx = GUIDE_TOLERANCE, closestX = null;
+                        let minDy = GUIDE_TOLERANCE, closestY = null;
+                        
+                        walls.forEach(w => {
+                            [ {x: w.x1, y: w.y1}, {x: w.x2, y: w.y2} ].forEach(pt => {
+                                if (Math.abs(nx - pt.x) < minDx) { minDx = Math.abs(nx - pt.x); closestX = pt.x; }
+                                if (Math.abs(ny - pt.y) < minDy) { minDy = Math.abs(ny - pt.y); closestY = pt.y; }
+                            });
+                        });
+
+                        if (!forceOrthoX && closestX !== null) { nx = closestX; activeGuides.push({type: 'v', pos: closestX}); }
+                        if (!forceOrthoY && closestY !== null) { ny = closestY; activeGuides.push({type: 'h', pos: closestY}); }
                     }
 
+                    setGuides(activeGuides);
                     setTempLine(prev => ({ ...prev, x2: nx, y2: ny }));
                     return;
                 }
@@ -636,14 +709,49 @@
                 if (drawMode !== 'none' && tempLine) {
                     const dist = Math.hypot(tempLine.x2 - tempLine.x1, tempLine.y2 - tempLine.y1);
                     if (dist > 5) { 
-                        // 在 2D 中画完窗户，自动携带默认高度数据保存
-                        setWalls([...walls, { 
-                            id: Date.now(), ...tempLine, type: drawMode,
+                        const newElement = { 
+                            id: Date.now().toString(), ...tempLine, type: drawMode,
                             sillHeight: drawMode === 'window' ? 0.9 : undefined,
                             winHeight: drawMode === 'window' ? 1.4 : undefined 
-                        }]);
+                        };
+
+                        if (drawMode === 'window') {
+                            let resultWalls = [];
+                            const w1 = {x: newElement.x1, y: newElement.y1};
+                            const w2 = {x: newElement.x2, y: newElement.y2};
+
+                            walls.forEach(wall => {
+                                if (wall.type !== 'solid') { resultWalls.push(wall); return; }
+                                
+                                const p1 = pointToSegment(w1.x, w1.y, wall.x1, wall.y1, wall.x2, wall.y2);
+                                const p2 = pointToSegment(w2.x, w2.y, wall.x1, wall.y1, wall.x2, wall.y2);
+
+                                if (p1.dist < 10 && p2.dist < 10) {
+                                    const wallLen2 = (wall.x2 - wall.x1)**2 + (wall.y2 - wall.y1)**2;
+                                    let t1 = ((p1.x - wall.x1)*(wall.x2 - wall.x1) + (p1.y - wall.y1)*(wall.y2 - wall.y1)) / wallLen2;
+                                    let t2 = ((p2.x - wall.x1)*(wall.x2 - wall.x1) + (p2.y - wall.y1)*(wall.y2 - wall.y1)) / wallLen2;
+                                    
+                                    let minT = Math.max(0, Math.min(1, Math.min(t1, t2)));
+                                    let maxT = Math.max(0, Math.min(1, Math.max(t1, t2)));
+
+                                    if (maxT - minT > 0.02) { 
+                                        if (minT > 0.02) resultWalls.push({ ...wall, id: Date.now() + Math.random().toString(), x2: wall.x1 + minT*(wall.x2-wall.x1), y2: wall.y1 + minT*(wall.y2-wall.y1) });
+                                        if (maxT < 0.98) resultWalls.push({ ...wall, id: Date.now() + Math.random().toString(), x1: wall.x1 + maxT*(wall.x2-wall.x1), y1: wall.y1 + maxT*(wall.y2-wall.y1) });
+                                    } else {
+                                        resultWalls.push(wall);
+                                    }
+                                } else {
+                                    resultWalls.push(wall);
+                                }
+                            });
+                            setWalls([...resultWalls, newElement]);
+                        } else {
+                            setWalls([...walls, newElement]);
+                        }
                     }
                     setTempLine(null);
+                    setGuides([]); 
+                    setSnapPoint(null); // 画完清除吸附点
                     return;
                 }
                 setDraggingId(null);
@@ -654,9 +762,8 @@
                 return () => window.removeEventListener('pointerup', handlePointerUp);
             });
 
-            // 传递 onUpdateWall 方法到 3D 视图组件中
             if (viewMode === '3d') {
-                return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} onUpdateWall={handleUpdateWall} onExit={() => setViewMode('2d')} />;
+                return <RoomViewer3D items={items} ppm={ppm} originPos={originPos} walls={walls} wallHeight={wallHeight} wallThickness={wallThickness} onUpdateWall={handleUpdateWall} onExit={() => setViewMode('2d')} />;
             }
 
             return (
@@ -664,15 +771,31 @@
                     <div className="w-full md:w-[360px] md:h-full h-1/2 flex-shrink-0 bg-white shadow-xl z-20 flex flex-col p-5 overflow-y-auto border-r border-gray-200">
                         <div className="flex justify-between items-center mb-4 border-b pb-3">
                             <h1 className="text-xl font-bold text-gray-900">户型设计与巡游</h1>
-                            <button 
-                                onClick={() => {
-                                    if(walls.length === 0) alert("请先使用下方的【墙体放样】工具画出几堵墙，再进入 3D 巡游！");
-                                    else setViewMode('3d');
-                                }}
-                                className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-2 px-3 rounded-lg shadow-lg transform transition hover:scale-105 flex items-center gap-1 text-sm animate-pulse"
-                            >
-                                🚀 3D 巡游
-                            </button>
+                            <div className="flex gap-2">
+                                <button 
+                                    onClick={() => {
+                                        if (window.confirm("确定要清空所有已画的墙体、窗户和家具吗？(底层图纸将保留)")) {
+                                            setWalls([]);
+                                            setItems([]);
+                                            setSelectedId(null);
+                                            setSelectedWallId(null);
+                                        }
+                                    }}
+                                    className="bg-red-100 text-red-600 hover:bg-red-200 font-bold py-2 px-3 rounded-lg transition text-sm flex items-center shadow-sm"
+                                    title="清空墙体和家具"
+                                >
+                                    🧹 清空
+                                </button>
+                                <button 
+                                    onClick={() => {
+                                        if(walls.length === 0) alert("请先使用下方的【墙体放样】工具画出几堵墙，再进入 3D 巡游！");
+                                        else setViewMode('3d');
+                                    }}
+                                    className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white font-bold py-2 px-3 rounded-lg shadow-lg transform transition hover:scale-105 flex items-center gap-1 text-sm animate-pulse"
+                                >
+                                    🚀 3D 巡游
+                                </button>
+                            </div>
                         </div>
 
                         <div className="mb-4 bg-green-50 p-3 rounded-lg border border-green-200">
@@ -719,33 +842,46 @@
 
                         <div className="mb-4 bg-blue-50 p-3 rounded-lg border border-blue-200">
                             <div className="flex justify-between items-center mb-2">
-                                <h2 className="text-sm font-bold text-blue-800">3. 墙体放样 (描边)</h2>
-                                <div className="flex items-center gap-1 text-xs">
-                                    <label className="text-blue-700">层高(m):</label>
-                                    <input type="number" step="0.1" value={wallHeight} onChange={(e)=>setWallHeight(Number(e.target.value))} className="w-12 px-1 border rounded" />
+                                <h2 className="text-sm font-bold text-blue-800">3. 墙体放样</h2>
+                            </div>
+                            <div className="flex gap-2 mb-3 text-xs">
+                                <div className="flex items-center gap-1 flex-1">
+                                    <label className="text-blue-700 font-medium">层高(m):</label>
+                                    <input type="number" step="0.1" value={wallHeight} onChange={(e)=>setWallHeight(Number(e.target.value))} className="w-full px-1 border rounded" />
+                                </div>
+                                <div className="flex items-center gap-1 flex-1">
+                                    <label className="text-blue-700 font-medium">墙厚(m):</label>
+                                    <input type="number" step="0.05" min="0.05" max="0.5" value={wallThickness} onChange={(e)=>setWallThickness(Number(e.target.value))} className="w-full px-1 border rounded" />
                                 </div>
                             </div>
-                            <p className="text-xs text-blue-600 mb-3 leading-tight">点击下方按钮，然后在图纸上沿着墙壁<b>按住并拖拽</b>画线。</p>
+                            <p className="text-[11px] text-blue-600 mb-2 leading-tight">画图时有绿点磁吸。画错时，请点击“选择/编辑”后点选图纸上的墙进行删除。</p>
                             
-                            <div className="flex gap-2 mb-2">
+                            {/* --- 优化：增加明确的 选择/画墙/画窗 三态按钮组 --- */}
+                            <div className="flex gap-1 mb-2">
                                 <button 
-                                    onClick={() => setDrawMode(drawMode === 'solid' ? 'none' : 'solid')}
-                                    className={`flex-1 py-2 rounded text-xs font-bold border ${drawMode === 'solid' ? 'bg-gray-800 text-white border-gray-800 shadow-inner' : 'bg-white text-gray-700 hover:bg-gray-100'}`}
+                                    onClick={() => setDrawMode('none')}
+                                    className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'none' ? 'bg-amber-100 text-amber-800 border-amber-300 shadow-inner' : 'bg-white text-gray-500 hover:bg-gray-100'}`}
                                 >
-                                    {drawMode === 'solid' ? '🔴 正在画: 实体墙' : '✏️ 画实体墙 (深灰)'}
+                                    👆 选择/编辑
                                 </button>
                                 <button 
-                                    onClick={() => setDrawMode(drawMode === 'window' ? 'none' : 'window')}
-                                    className={`flex-1 py-2 rounded text-xs font-bold border ${drawMode === 'window' ? 'bg-blue-500 text-white border-blue-500 shadow-inner' : 'bg-white text-blue-600 hover:bg-blue-50'}`}
+                                    onClick={() => setDrawMode('solid')}
+                                    className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'solid' ? 'bg-gray-800 text-white border-gray-800 shadow-inner' : 'bg-white text-gray-700 hover:bg-gray-100'}`}
                                 >
-                                    {drawMode === 'window' ? '🔴 正在画: 窗户' : '🪟 画窗户 (亮色)'}
+                                    {drawMode === 'solid' ? '🔴 画墙中' : '✏️ 画墙壁'}
+                                </button>
+                                <button 
+                                    onClick={() => setDrawMode('window')}
+                                    className={`flex-1 py-2 rounded text-[10px] font-bold border transition ${drawMode === 'window' ? 'bg-blue-500 text-white border-blue-500 shadow-inner' : 'bg-white text-blue-600 hover:bg-blue-50'}`}
+                                >
+                                    {drawMode === 'window' ? '🔴 画窗中' : '🪟 画窗户'}
                                 </button>
                             </div>
                             
                             {walls.length > 0 && (
                                 <div className="flex justify-between items-center mt-2 border-t border-blue-200 pt-2">
                                     <span className="text-xs text-blue-700">已画线段: {walls.length} 条</span>
-                                    <button onClick={() => setWalls(walls.slice(0, -1))} className="text-xs text-red-500 hover:underline">撤销上一步</button>
+                                    {drawMode === 'none' && <span className="text-xs text-amber-600 font-bold animate-pulse">现在可以点选删除墙壁</span>}
                                 </div>
                             )}
                         </div>
@@ -791,14 +927,35 @@
                             </div>
                         </div>
 
-                        {selectedId && selectedId !== 'ruler' && selectedId !== 'origin' && drawMode === 'none' && (
-                            <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mt-auto">
-                                <p className="text-xs font-bold mb-2">编辑选中物品</p>
-                                <div className="flex gap-2 mb-2">
-                                    <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r-90)%360}:i))} className="flex-1 bg-white border py-1 rounded text-xs">↺ 转</button>
-                                    <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r+90)%360}:i))} className="flex-1 bg-white border py-1 rounded text-xs">↻ 转</button>
+                        {(selectedId && selectedId !== 'ruler' && selectedId !== 'origin' && drawMode === 'none') && (
+                            <div className="bg-gray-50 p-3 rounded-lg border border-gray-200 mt-auto shadow-sm">
+                                <div className="flex justify-between items-center mb-2">
+                                    <p className="text-xs font-bold text-gray-800">编辑选中物品</p>
+                                    <div className="flex items-center gap-1">
+                                        <label className="text-[10px] text-gray-500">改色:</label>
+                                        <input
+                                            type="color"
+                                            value={items.find(i=>i.id===selectedId)?.color || '#000000'}
+                                            onChange={(e) => setItems(items.map(i=>i.id===selectedId?{...i, color: e.target.value}:i))}
+                                            className="w-5 h-5 p-0 border-0 rounded cursor-pointer"
+                                            title="修改家具颜色"
+                                        />
+                                    </div>
                                 </div>
-                                <button onClick={() => {setItems(items.filter(i=>i.id!==selectedId)); setSelectedId(null);}} className="w-full bg-red-100 text-red-600 py-1 rounded text-xs">删除</button>
+                                <div className="flex gap-2 mb-2">
+                                    <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r-90)%360}:i))} className="flex-1 bg-white border hover:bg-gray-100 py-1 rounded text-xs transition">↺ 转 90°</button>
+                                    <button onClick={() => setItems(items.map(i=>i.id===selectedId?{...i, r:(i.r+90)%360}:i))} className="flex-1 bg-white border hover:bg-gray-100 py-1 rounded text-xs transition">↻ 转 90°</button>
+                                </div>
+                                <button onClick={() => {setItems(items.filter(i=>i.id!==selectedId)); setSelectedId(null);}} className="w-full bg-red-100 text-red-600 hover:bg-red-200 py-1.5 rounded text-xs font-bold transition">🗑️ 删除该物品</button>
+                            </div>
+                        )}
+                        
+                        {(selectedWallId && drawMode === 'none') && (
+                            <div className="bg-red-50 p-3 rounded-lg border border-red-200 mt-auto">
+                                <p className="text-xs font-bold text-red-800 mb-2">编辑选中墙体 / 窗户</p>
+                                <button onClick={() => {setWalls(walls.filter(w=>w.id !== selectedWallId)); setSelectedWallId(null);}} className="w-full bg-red-600 text-white hover:bg-red-700 py-2 rounded text-xs font-bold transition shadow-sm">
+                                    🗑️ 删除选中线段
+                                </button>
                             </div>
                         )}
                     </div>
@@ -825,24 +982,52 @@
                         )}
 
                         <svg className="absolute top-0 left-0 pointer-events-none" style={{ width: '10000px', height: '10000px', zIndex: 5 }}>
+                            {guides.map((g, i) => {
+                                if (g.type === 'v') return <line key={`gv-${i}`} x1={g.pos * zoom} y1={-10000} x2={g.pos * zoom} y2={10000} stroke="#ec4899" strokeWidth="1" strokeDasharray="5 5" opacity="0.6" />;
+                                if (g.type === 'h') return <line key={`gh-${i}`} x1={-10000} y1={g.pos * zoom} x2={10000} y2={g.pos * zoom} stroke="#ec4899" strokeWidth="1" strokeDasharray="5 5" opacity="0.6" />;
+                                return null;
+                            })}
+                            
                             {walls.map(w => (
-                                <line key={w.id} 
-                                    x1={w.x1 * zoom} y1={w.y1 * zoom} 
-                                    x2={w.x2 * zoom} y2={w.y2 * zoom}
-                                    stroke={w.type === 'window' ? '#3b82f6' : '#1f2937'} 
-                                    strokeWidth={28 * zoom} 
-                                    strokeLinecap="round" 
-                                    opacity={w.type === 'window' ? 0.7 : 0.9}
-                                />
+                                <g key={w.id}>
+                                    {/* 透明的加粗点击热区，确保再细的墙也能被轻松点中 */}
+                                    <line 
+                                        x1={w.x1 * zoom} y1={w.y1 * zoom} 
+                                        x2={w.x2 * zoom} y2={w.y2 * zoom}
+                                        stroke="transparent"
+                                        strokeWidth={Math.max(wallThickness * ppm * zoom, 24)} 
+                                        className={drawMode === 'none' ? "cursor-pointer pointer-events-auto" : "pointer-events-none"}
+                                        style={{ pointerEvents: drawMode === 'none' ? 'stroke' : 'none' }}
+                                        onPointerDown={(e) => handlePointerDown(e, `wall_${w.id}`, 0, 0)}
+                                    />
+                                    {/* 视觉上的实体墙：改用方头(square)线条让 2D 墙角更方正 */}
+                                    <line 
+                                        x1={w.x1 * zoom} y1={w.y1 * zoom} 
+                                        x2={w.x2 * zoom} y2={w.y2 * zoom}
+                                        stroke={selectedWallId === w.id ? '#ef4444' : (w.type === 'window' ? '#3b82f6' : '#1f2937')} 
+                                        strokeWidth={wallThickness * ppm * zoom} 
+                                        strokeLinecap="square" 
+                                        opacity={w.type === 'window' ? 0.7 : 0.9}
+                                        className="pointer-events-none transition-colors"
+                                    />
+                                </g>
                             ))}
                             {tempLine && (
                                 <line 
                                     x1={tempLine.x1 * zoom} y1={tempLine.y1 * zoom} 
                                     x2={tempLine.x2 * zoom} y2={tempLine.y2 * zoom}
                                     stroke={drawMode === 'window' ? '#3b82f6' : '#1f2937'} 
-                                    strokeWidth={28 * zoom} 
+                                    strokeWidth={wallThickness * ppm * zoom} 
                                     strokeDasharray="8 8"
-                                    strokeLinecap="round" 
+                                    strokeLinecap="square" 
+                                />
+                            )}
+                            
+                            {/* 新增：磁性吸附点绿灯提示 */}
+                            {snapPoint && drawMode !== 'none' && (
+                                <circle 
+                                    cx={snapPoint.x * zoom} cy={snapPoint.y * zoom} 
+                                    r={8} fill="#10b981" stroke="#ffffff" strokeWidth="2"
                                 />
                             )}
                         </svg>
@@ -880,7 +1065,7 @@
                                     border: item.id === selectedId ? '3px solid #000' : '2px solid rgba(0,0,0,0.5)',
                                     boxShadow: item.id === selectedId ? '0 10px 20px -5px rgba(0,0,0,0.5)' : '0 4px 6px -1px rgba(0,0,0,0.3)',
                                     zIndex: item.id === selectedId ? 30 : 10, 
-                                    borderRadius: item.type === 'light' ? '50%' : '4px', // 灯具在2D中显示为圆形
+                                    borderRadius: item.type === 'light' ? '50%' : '4px', 
                                     touchAction: 'none'
                                 }}
                                 onPointerDown={(e) => handlePointerDown(e, item.id, item.x, item.y)}
